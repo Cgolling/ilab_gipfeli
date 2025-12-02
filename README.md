@@ -19,6 +19,7 @@ Unser Roboterhund SPOT geht dann in die Mensa und kauft die Produkte, welcher er
 - [Usage](#usage)  
 - [Development](#development)  
 - [Contributing](#contributing)   -->
+- [Setup](#setup)
 - [License](#license)  
 - [Contact](#contact)
 
@@ -72,6 +73,43 @@ curl -H "Authorization: Bearer $API_KEY" "$API_URL/endpoint"
 <!-- ## Contributing
 Please read CONTRIBUTING.md (placeholder). Use issues and PR templates. Keep changes small and documented.
  -->
+## Setup
+
+### 1. Install uv
+```bash
+pip install uv
+```
+
+Oder folge der offiziellen Anleitung: https://docs.astral.sh/uv/getting-started/installation/
+
+### 2. Virtuelle Umgebung erstellen und aktivieren
+
+```bash
+# im Projekt-Root
+uv venv .venv
+
+# aktivieren unter Linux/macOS
+source .venv/bin/activate
+
+# aktivieren unter Windows (PowerShell)
+.\.venv\Scripts\Activate.ps1
+```
+
+### 3. Abhängigkeiten installieren 
+
+Dieses Projekt verwendet eine `pyproject.toml`. Installiere alle Abhängigkeiten mit:
+
+```bash
+uv sync
+```
+
+### 4. Projekt starten
+
+```bash
+# Example TODO
+uv run python -m gipfeli
+```
+
 ## License
 Dieses Projekt steht unter der GNU General Public License Version 3 (GPLv3).  
 Der vollständige Lizenztext befindet sich in der Datei `COPYING`.  
