@@ -7,7 +7,7 @@ Unser Roboterhund SPOT geht dann in die Mensa und kauft die Produkte, welcher er
 
 > Modern educational project to develop an autonomous delivery service using an autonomous robot dog.
 
-[![Status](https://img.shields.io/badge/status-ALPHA-orange)](#) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Build](https://img.shields.io/badge/build-passing-brightgreen)](#)
+[![Status](https://img.shields.io/badge/status-ALPHA-orange)](#) [![License](https://img.shields.io/badge/license-GPLv3-blue)](LICENSE) [![Build](https://img.shields.io/badge/build-passing-brightgreen)](#)
 
 ---
 
