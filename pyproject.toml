@@ -1,0 +1,9 @@
+[project]
+name = "ilab-gipfeli"
+version = "0.1.0"
+description = "A project by iLab Kanti Glarus."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "python-telegram-bot>=22.5",
+]
