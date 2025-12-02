@@ -110,6 +110,15 @@ uv sync
 uv run python -m gipfeli
 ```
 
+### 5. Notes on using the spot-sdk examples
+Remove the following line from `view_map.py` to enable mouse controls. 
+*At least on MacBook Air M4.*
+
+```python
+renderWindow.Start()
+```
+ 
+
 ## License
 Dieses Projekt steht unter der GNU General Public License Version 3 (GPLv3).  
 Der vollständige Lizenztext befindet sich in der Datei `COPYING`.  
