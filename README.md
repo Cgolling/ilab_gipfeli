@@ -7,7 +7,7 @@ Unser Roboterhund SPOT geht dann in die Mensa und kauft die Produkte, welcher er
 
 > Modern educational project to develop an autonomous delivery service using an autonomous robot dog.
 
-[![Status](https://img.shields.io/badge/status-ALPHA-orange)](#) [![License](https://img.shields.io/badge/license-GPLv3-blue)](LICENSE) [![Build](https://img.shields.io/badge/build-passing-brightgreen)](#)
+[![Status](https://img.shields.io/badge/status-ALPHA-orange)](#) [![License](https://img.shields.io/badge/license-GPLv3-blue)](COPYING) [![Build](https://img.shields.io/badge/build-passing-brightgreen)](#)
 
 ---
 
@@ -73,9 +73,10 @@ curl -H "Authorization: Bearer $API_KEY" "$API_URL/endpoint"
 Please read CONTRIBUTING.md (placeholder). Use issues and PR templates. Keep changes small and documented.
  -->
 ## License
-This project is licensed under the GPLv3 License — see the LICENSE file for details.  
+Dieses Projekt steht unter der GNU General Public License Version 3 (GPLv3).  
+Der vollständige Lizenztext befindet sich in der Datei `COPYING`.  
 
 ## Contact
 Maintainer: Christopher Golling, cgolling@ethz.ch
-Repository: 
+Repository:
 
