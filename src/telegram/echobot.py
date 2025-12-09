@@ -19,8 +19,8 @@ import logging
 import os
 
 from dotenv import load_dotenv
-from telegram import ForceReply, Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram import ForceReply, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
 # Enable logging
 logging.basicConfig(
@@ -48,6 +48,31 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text("Help!")
 
 
+async def goto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send inline keyboard with location options."""
+    keyboard = [
+        [
+            InlineKeyboardButton("Aula", callback_data="goto_aula"),
+            InlineKeyboardButton("Triangle", callback_data="goto_triangle"),
+        ],
+        [
+            InlineKeyboardButton("Hauswart", callback_data="goto_hauswart"),
+            InlineKeyboardButton("Turnhalle", callback_data="goto_turnhalle"),
+        ],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Where do you want to go?", reply_markup=reply_markup)
+
+
+async def goto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle goto button presses."""
+    query = update.callback_query
+    await query.answer()
+
+    location = query.data.replace("goto_", "").title()
+    await query.edit_message_text(text=f"Going to: {location}")
+
+
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Echo the user message."""
     await update.message.reply_text(update.message.text)
@@ -59,7 +84,8 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "Sorry, I didn't understand that command.\n\n"
         "Available commands:\n"
         "/start - Start the bot\n"
-        "/help - Get help"
+        "/help - Get help\n"
+        "/goto - Go to a location"
     )
 
 
@@ -76,6 +102,8 @@ def main() -> None:
     # on different commands - answer in Telegram
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("goto", goto))
+    application.add_handler(CallbackQueryHandler(goto_callback, pattern="^goto_"))
 
     # on non command i.e message - echo the message on Telegram
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
