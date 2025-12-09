@@ -53,6 +53,16 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(update.message.text)
 
 
+async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Inform the user that the command was not found."""
+    await update.message.reply_text(
+        "Sorry, I didn't understand that command.\n\n"
+        "Available commands:\n"
+        "/start - Start the bot\n"
+        "/help - Get help"
+    )
+
+
 def main() -> None:
     """Start the bot."""
     load_dotenv()
@@ -69,6 +79,9 @@ def main() -> None:
 
     # on non command i.e message - echo the message on Telegram
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+
+    # handle unknown commands
+    application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
 
     # Run the bot until the user presses Ctrl-C
     application.run_polling(allowed_updates=Update.ALL_TYPES)
