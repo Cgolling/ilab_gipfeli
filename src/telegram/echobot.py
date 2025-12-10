@@ -3,24 +3,25 @@
 # This program is dedicated to the public domain under the CC0 license.
 
 """
-Simple Bot to reply to Telegram messages.
+Telegram Bot for SPOT Robot Control.
 
-First, a few handler functions are defined. Then, those functions are passed to
-the Application and registered at their respective places.
-Then, the bot is started and runs until we press Ctrl-C on the command line.
-
-Usage:
-Basic Echobot example, repeats messages.
-Press Ctrl-C on the command line or send a signal to the process to stop the
-bot.
+This bot allows users to control the Boston Dynamics SPOT robot
+via Telegram, including navigation to predefined waypoints.
 """
 
 import logging
 import os
+import sys
+from typing import Optional
+
+# Add project root to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from dotenv import load_dotenv
 from telegram import ForceReply, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
+
+from src.spot import SpotController
 
 # Enable logging
 logging.basicConfig(
@@ -30,6 +31,9 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
+
+# Global SPOT controller instance
+spot_controller: Optional[SpotController] = None
 
 
 # Define a few command handlers. These usually take the two arguments update and
@@ -45,7 +49,36 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
-    await update.message.reply_text("Help!")
+    await update.message.reply_text(
+        "SPOT Robot Control Bot\n\n"
+        "Commands:\n"
+        "/start - Start the bot\n"
+        "/help - Show this help message\n"
+        "/connect - Connect to SPOT robot\n"
+        "/goto - Navigate to a location"
+    )
+
+
+async def connect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Connect to SPOT robot."""
+    global spot_controller
+
+    hostname = os.getenv("SPOT_HOSTNAME", "192.168.80.3")
+    map_path = "maps/map_catacombs_01"
+
+    await update.message.reply_text("Starting SPOT connection procedure...")
+
+    spot_controller = SpotController(hostname, map_path)
+
+    async def send_status(msg: str):
+        await update.message.reply_text(msg)
+
+    success = await spot_controller.connect(send_status)
+
+    if success:
+        await update.message.reply_text("SPOT is ready! Use /goto to navigate.")
+    else:
+        await update.message.reply_text("SPOT connection failed. Use /connect to retry.")
 
 
 async def goto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -65,12 +98,30 @@ async def goto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def goto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle goto button presses."""
+    """Handle goto button presses and navigate SPOT to the selected location."""
     query = update.callback_query
     await query.answer()
 
-    location = query.data.replace("goto_", "").title()
-    await query.edit_message_text(text=f"Going to: {location}")
+    location = query.data.replace("goto_", "")
+
+    # Check if SPOT is connected
+    if spot_controller is None or not spot_controller.is_connected:
+        await query.edit_message_text("SPOT not connected. Use /connect first.")
+        return
+
+    # Navigate with heartbeat updates
+    async def send_status(msg: str):
+        try:
+            await query.edit_message_text(msg)
+        except Exception:
+            pass  # Message might have been deleted or edited already
+
+    success = await spot_controller.navigate_to(location, send_status)
+
+    if success:
+        await query.edit_message_text(f"Arrived at {location.title()}!")
+    else:
+        await query.edit_message_text(f"Failed to navigate to {location.title()}")
 
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -85,8 +136,32 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "Available commands:\n"
         "/start - Start the bot\n"
         "/help - Get help\n"
+        "/connect - Connect to SPOT robot\n"
         "/goto - Go to a location"
     )
+
+
+async def post_init(application: Application) -> None:
+    """Try to connect to SPOT once on startup."""
+    global spot_controller
+
+    hostname = os.getenv("SPOT_HOSTNAME", "192.168.80.3")
+    map_path = "maps/map_catacombs_01"
+
+    logger.info(f"Attempting auto-connect to SPOT at {hostname}...")
+    spot_controller = SpotController(hostname, map_path)
+
+    async def log_status(msg: str):
+        logger.info(f"SPOT: {msg}")
+
+    try:
+        success = await spot_controller.connect(log_status)
+        if success:
+            logger.info("SPOT connected successfully on startup")
+        else:
+            logger.warning("SPOT auto-connect failed. Use /connect to retry.")
+    except Exception as e:
+        logger.warning(f"SPOT auto-connect failed: {e}. Use /connect to retry.")
 
 
 def main() -> None:
@@ -96,12 +171,13 @@ def main() -> None:
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN not found in environment variables")
 
-    # Create the Application and pass it your bot's token.
-    application = Application.builder().token(token).build()
+    # Create the Application with post_init for auto-connect
+    application = Application.builder().token(token).post_init(post_init).build()
 
     # on different commands - answer in Telegram
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("connect", connect_spot))
     application.add_handler(CommandHandler("goto", goto))
     application.add_handler(CallbackQueryHandler(goto_callback, pattern="^goto_"))
 
