@@ -73,7 +73,7 @@ cp .env.example .env
 # Dann .env bearbeiten und Werte eintragen
 
 # 5. Bot starten
-uv run python -m src.telegram.echobot
+uv run python -m src.telegram.bot
 ```
 
 > **Hinweis:** Falls etwas nicht klappt, lies die [detaillierte Einrichtung](#detaillierte-einrichtung) unten.
@@ -221,7 +221,7 @@ Um den Telegram-Bot zu nutzen, brauchst du einen **Bot Token** von Telegram.
 Wenn alles eingerichtet ist:
 
 ```bash
-uv run python -m src.telegram.echobot
+uv run python -m src.telegram.bot
 ```
 
 Du solltest sehen:
@@ -241,7 +241,7 @@ ilab_gipfeli/
 │   ├── spot/                 # SPOT Roboter Steuerung
 │   │   └── spot_controller.py
 │   └── telegram/             # Telegram Bot
-│       └── echobot.py
+│       └── bot.py
 ├── spot-sdk/                 # Boston Dynamics SDK (Git Submodule)
 ├── maps/                     # Navigationskarten für SPOT
 │   └── map_catacombs_01/

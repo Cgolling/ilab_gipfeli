@@ -14,7 +14,7 @@ Educational notes:
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from src.telegram.echobot import (
+from src.telegram.bot import (
     start,
     help_command,
     goto,
@@ -144,7 +144,7 @@ class TestGotoCallback:
         update.callback_query = mock_callback_query
 
         # Ensure global controller is None
-        with patch("src.telegram.echobot.spot_controller", None):
+        with patch("src.telegram.bot.spot_controller", None):
             await goto_callback(update, mock_telegram_context)
 
         mock_callback_query.edit_message_text.assert_called()
@@ -163,7 +163,7 @@ class TestGotoCallback:
         mock_controller = MagicMock()
         mock_controller.is_connected = False
 
-        with patch("src.telegram.echobot.spot_controller", mock_controller):
+        with patch("src.telegram.bot.spot_controller", mock_controller):
             await goto_callback(update, mock_telegram_context)
 
         msg = mock_callback_query.edit_message_text.call_args[0][0]
@@ -177,7 +177,7 @@ class TestGotoCallback:
         update = MagicMock()
         update.callback_query = mock_callback_query
 
-        with patch("src.telegram.echobot.spot_controller", None):
+        with patch("src.telegram.bot.spot_controller", None):
             await goto_callback(update, mock_telegram_context)
 
         mock_callback_query.answer.assert_called_once()
@@ -196,7 +196,7 @@ class TestGotoCallback:
         mock_controller.is_connected = True
         mock_controller.navigate_to = AsyncMock(return_value=True)
 
-        with patch("src.telegram.echobot.spot_controller", mock_controller):
+        with patch("src.telegram.bot.spot_controller", mock_controller):
             await goto_callback(update, mock_telegram_context)
 
         # Verify navigate_to was called with correct location
@@ -217,7 +217,7 @@ class TestGotoCallback:
         mock_controller.is_connected = True
         mock_controller.navigate_to = AsyncMock(return_value=True)
 
-        with patch("src.telegram.echobot.spot_controller", mock_controller):
+        with patch("src.telegram.bot.spot_controller", mock_controller):
             await goto_callback(update, mock_telegram_context)
 
         # Check final message mentions arrival
@@ -237,7 +237,7 @@ class TestGotoCallback:
         mock_controller.is_connected = True
         mock_controller.navigate_to = AsyncMock(return_value=False)
 
-        with patch("src.telegram.echobot.spot_controller", mock_controller):
+        with patch("src.telegram.bot.spot_controller", mock_controller):
             await goto_callback(update, mock_telegram_context)
 
         final_msg = mock_callback_query.edit_message_text.call_args[0][0]

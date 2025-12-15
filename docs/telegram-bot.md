@@ -216,7 +216,7 @@ Users see friendly error messages, not stack traces.
 
 | File | Purpose |
 |------|---------|
-| `src/telegram/echobot.py` | Main bot code |
+| `src/telegram/bot.py` | Main bot code |
 | `src/logging_config.py` | Logging setup |
 | `.env` | Bot token (secret!) |
 

@@ -21,7 +21,7 @@ uv sync
 uv sync --extra dev
 
 # Run the Telegram bot
-uv run python -m src.telegram.echobot
+uv run python -m src.telegram.bot
 ```
 
 ## Testing
@@ -66,7 +66,7 @@ Required in `.env` file (see `.env.example`):
 
 ### Three Main Components
 
-1. **Telegram Bot** (`src/telegram/echobot.py`) - User interface handling commands (`/start`, `/help`, `/connect`, `/disconnect`, `/forceconnect`, `/status`, `/goto`) and inline button callbacks for location selection
+1. **Telegram Bot** (`src/telegram/bot.py`) - User interface handling commands (`/start`, `/help`, `/connect`, `/disconnect`, `/forceconnect`, `/status`, `/goto`) and inline button callbacks for location selection
 
 2. **SPOT Controller** (`src/spot/spot_controller.py`) - Robot control managing authentication, lease acquisition, map upload, fiducial-based localization, and GraphNav navigation
 
