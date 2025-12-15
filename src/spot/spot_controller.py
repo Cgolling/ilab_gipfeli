@@ -391,6 +391,12 @@ class SpotController:
         # Force trigger timesync
         self.robot.time_sync.wait_for_sync()
 
+        # Check E-Stop status immediately - fail fast if robot is stopped
+        if self.robot.is_estopped():
+            raise Exception(
+                "Robot is E-Stopped! Release the physical E-Stop or software Cut before connecting."
+            )
+
         # Create clients
         self.robot_command_client = self.robot.ensure_client(
             RobotCommandClient.default_service_name)
