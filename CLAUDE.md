@@ -17,9 +17,42 @@ uv venv .venv
 source .venv/bin/activate
 uv sync
 
+# Install dev dependencies (for testing)
+uv sync --extra dev
+
 # Run the Telegram bot
 uv run python -m src.telegram.echobot
 ```
+
+## Testing
+
+```bash
+# Run all tests
+uv run pytest
+
+# Run with verbose output
+uv run pytest -v
+
+# Run specific test file
+uv run pytest tests/test_spot/test_pure_functions.py
+
+# Run tests matching a pattern
+uv run pytest -k "test_connect"
+
+# Run with coverage report (HTML)
+uv run pytest --cov-report=html
+
+# View coverage report
+open coverage_html/index.html
+```
+
+## Logging
+
+Logs are written to `logs/` directory with automatic rotation (5 MB max, 5 backups):
+- `logs/spot.log` - SPOT robot operations (connection, lease, navigation, power)
+- `logs/telegram.log` - Telegram bot events (commands, callbacks)
+
+Console shows INFO level; files capture DEBUG level for detailed debugging.
 
 ## Environment Variables
 

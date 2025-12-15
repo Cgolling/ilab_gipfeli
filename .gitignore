@@ -11,3 +11,11 @@ wheels/
 
 # Environment variable files
 .env
+
+# Log files
+logs/
+
+# Test coverage reports
+.coverage
+coverage_html/
+htmlcov/
