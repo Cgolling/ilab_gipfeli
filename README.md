@@ -32,6 +32,7 @@ Unsere Vision ist ein **Gipfeli-Delivery Service** innerhalb unseres Schulhauses
   - [Bot starten](#bot-starten)
 - [Projektstruktur](#projektstruktur)
 - [Bot-Befehle](#bot-befehle)
+- [Map Viewer](#map-viewer)
 - [Troubleshooting](#troubleshooting)
 - [Entwicklung](#entwicklung)
 - [Lizenz](#lizenz)
@@ -56,7 +57,7 @@ Für Ungeduldige - hier die Kurzversion:
 
 ```bash
 # 1. Repository klonen (mit Submodule!)
-git clone --recurse-submodules https://github.com/DEIN-USERNAME/ilab_gipfeli.git
+git clone --recurse-submodules https://github.com/Cgolling/ilab_gipfeli.git
 cd ilab_gipfeli
 
 # 2. UV installieren (falls noch nicht vorhanden)
@@ -100,7 +101,7 @@ Dieses Projekt verwendet ein **Git Submodule** für das Boston Dynamics SPOT SDK
 **Wichtig:** Verwende `--recurse-submodules` beim Klonen!
 
 ```bash
-git clone --recurse-submodules https://github.com/DEIN-USERNAME/ilab_gipfeli.git
+git clone --recurse-submodules https://github.com/Cgolling/ilab_gipfeli.git
 cd ilab_gipfeli
 ```
 
@@ -240,11 +241,19 @@ ilab_gipfeli/
 ├── src/                      # Quellcode
 │   ├── spot/                 # SPOT Roboter Steuerung
 │   │   └── spot_controller.py
-│   └── telegram/             # Telegram Bot
-│       └── bot.py
+│   ├── telegram/             # Telegram Bot
+│   │   └── bot.py
+│   └── map_viewer/           # Interaktive Kartenvisualisierung
+│       ├── cli.py
+│       ├── loader.py
+│       ├── transformer.py
+│       └── viewer.py
+├── tests/                    # Unit Tests
+├── docs/                     # Dokumentation
 ├── spot-sdk/                 # Boston Dynamics SDK (Git Submodule)
 ├── maps/                     # Navigationskarten für SPOT
 │   └── map_catacombs_01/
+├── logs/                     # Log-Dateien (automatisch erstellt)
 ├── .env.example              # Vorlage für Umgebungsvariablen
 ├── .env                      # Deine lokalen Secrets (nicht in Git!)
 ├── pyproject.toml            # Projekt-Konfiguration und Dependencies
@@ -271,6 +280,37 @@ ilab_gipfeli/
 - Triangle
 - Hauswart
 - Turnhalle
+
+---
+
+## Map Viewer
+
+Interaktives 3D-Visualisierungstool für GraphNav-Karten. Ermöglicht das Betrachten von Waypoints, Edges und optionalen Point Clouds direkt im Browser.
+
+**Installation der Viewer-Dependencies:**
+```bash
+uv sync --extra viewer
+```
+
+**Grundlegende Nutzung:**
+```bash
+# Karte im Browser anzeigen
+uv run python -m src.map_viewer maps/map_catacombs_01/
+
+# Mit Annotationen (Waypoint-Namen anzeigen)
+uv run python -m src.map_viewer maps/map_catacombs_01/ -a
+
+# Bestimmte Waypoints hervorheben
+uv run python -m src.map_viewer maps/map_catacombs_01/ -a --highlight Au Tr Ha Tu
+
+# Point Clouds anzeigen (falls vorhanden)
+uv run python -m src.map_viewer maps/map_catacombs_01/ -a --show-point-clouds
+
+# Als HTML-Datei exportieren
+uv run python -m src.map_viewer maps/map_catacombs_01/ --export karte.html
+```
+
+Ausführliche Dokumentation: [docs/map_viewer.md](docs/map_viewer.md)
 
 ---
 
@@ -342,4 +382,4 @@ Der vollständige Lizenztext befindet sich in der Datei [COPYING](COPYING).
 
 **Maintainer:** Christopher Golling
 **E-Mail:** cgolling@ethz.ch
-**Repository:** [GitHub](https://github.com/DEIN-USERNAME/ilab_gipfeli)
+**Repository:** [GitHub](https://github.com/Cgolling/ilab_gipfeli)
