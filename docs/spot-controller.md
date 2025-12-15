@@ -262,14 +262,60 @@ maps/map_catacombs_01/
     └── ...
 ```
 
+## Reliability Features
+
+### Graceful Shutdown
+
+When the bot stops (Ctrl+C or SIGTERM), it automatically releases the lease:
+
+```
+Bot running → Ctrl+C pressed
+                    │
+                    ▼
+            post_shutdown() called
+                    │
+                    ▼
+            spot_controller.disconnect()
+                    │
+                    ▼
+            Lease released cleanly
+                    │
+                    ▼
+            Next bot start → Can acquire lease!
+```
+
+### Force Connect
+
+If the lease is stuck (from a crashed bot), use `/forceconnect`:
+
+```
+/forceconnect → Takes lease from ANY client
+                    │
+                    ▼
+            Previous owner disconnected
+                    │
+                    ▼
+            Bot now has control
+```
+
+### Status Monitoring
+
+Use `/status` to check:
+- Connection state
+- Motor power (sitting/standing)
+- Battery percentage
+- E-stop status
+- Current lease owner
+
 ## Common Issues & Solutions
 
 | Issue | Cause | Solution |
 |-------|-------|----------|
-| "Lease already claimed" | Tablet has control | Release on tablet |
+| "Lease already claimed" | Tablet or crashed bot has lease | Use `/forceconnect` |
 | "Failed to localize" | No fiducial visible | Move robot to see a marker |
 | "Robot got stuck" | Obstacle in path | Clear the path |
 | "Connection refused" | Wrong IP or robot off | Check IP, power on robot |
+| Can't reconnect after restart | Previous bot didn't release lease | Use `/forceconnect` |
 
 ## Further Reading
 

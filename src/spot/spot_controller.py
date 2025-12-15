@@ -246,12 +246,76 @@ class SpotController:
         """Check if connected to SPOT."""
         return self._connected and self.robot is not None
 
-    async def connect(self, status_callback: Callable[[str], Awaitable[None]]) -> bool:
+    def get_status(self) -> dict:
+        """
+        Get current status of the robot connection and state.
+
+        Returns:
+            Dictionary with status information:
+            - connected: bool
+            - hostname: str
+            - powered_on: bool or None if not connected
+            - battery_percent: float or None
+            - lease_owner: str or None
+        """
+        status = {
+            "connected": self._connected,
+            "hostname": self.hostname,
+            "powered_on": None,
+            "battery_percent": None,
+            "lease_owner": None,
+            "estop_status": None,
+        }
+
+        if not self.robot:
+            return status
+
+        try:
+            # Get robot state
+            if self.robot_state_client:
+                robot_state = self.robot_state_client.get_robot_state()
+                power_state = robot_state.power_state
+                status["powered_on"] = (
+                    power_state.motor_power_state == robot_state_pb2.PowerState.STATE_ON
+                )
+
+                # Battery info
+                for battery in robot_state.battery_states:
+                    status["battery_percent"] = battery.charge_percentage.value
+
+                # E-stop status
+                for estop in robot_state.estop_states:
+                    if estop.state != robot_state_pb2.EStopState.STATE_ESTOPPED:
+                        status["estop_status"] = "OK"
+                    else:
+                        status["estop_status"] = "ESTOPPED"
+                        break
+
+            # Get lease info
+            if self.lease_client:
+                lease_info = self.lease_client.list_leases()
+                for resource in lease_info:
+                    if resource.resource == "body":
+                        if resource.lease_owner.client_name:
+                            status["lease_owner"] = resource.lease_owner.client_name
+
+        except Exception as e:
+            logger.debug(f"Error getting status: {e}")
+
+        return status
+
+    async def connect(
+        self,
+        status_callback: Callable[[str], Awaitable[None]],
+        force_acquire: bool = False
+    ) -> bool:
         """
         Connect to SPOT and initialize for navigation.
 
         Args:
             status_callback: Async function to report status updates
+            force_acquire: If True, forcefully take the lease from any other client.
+                Use with caution - this will disconnect tablet or other controllers!
 
         Returns:
             True if connection successful, False otherwise
@@ -263,8 +327,13 @@ class SpotController:
             await status_callback("Authenticated with SPOT")
 
             # Step 2: Acquire lease
-            await status_callback("Acquiring lease...")
-            await asyncio.to_thread(self._acquire_lease)
+            if force_acquire:
+                await status_callback("Force-acquiring lease (taking control)...")
+                await asyncio.to_thread(self._force_acquire_lease)
+                logger.warning("Lease force-acquired - other clients disconnected")
+            else:
+                await status_callback("Acquiring lease...")
+                await asyncio.to_thread(self._acquire_lease)
             logger.info("Lease acquired successfully, keepalive started")
             await status_callback("Lease acquired")
 
@@ -281,8 +350,25 @@ class SpotController:
             self._connected = True
             return True
 
-        except ResourceAlreadyClaimedError:
-            await status_callback("Lease already claimed. Check for tablet connection.")
+        except ResourceAlreadyClaimedError as e:
+            logger.error(f"Lease already claimed: {e}")
+            await status_callback(
+                "Lease already claimed by another client!\n\n"
+                "Options:\n"
+                "1. Use /disconnect on the other client\n"
+                "2. Release control from the tablet\n"
+                "3. Use /forceconnect to take over (use with caution!)"
+            )
+            return False
+        except ConnectionRefusedError:
+            logger.error(f"Connection refused to {self.hostname}")
+            await status_callback(
+                f"Cannot reach SPOT at {self.hostname}\n\n"
+                "Check:\n"
+                "1. Is the robot powered on?\n"
+                "2. Is the IP address correct?\n"
+                "3. Are you on the robot's network?"
+            )
             return False
         except Exception as e:
             logger.exception("Failed to connect to SPOT")
@@ -342,6 +428,36 @@ class SpotController:
         self.lease_keepalive = LeaseKeepAlive(
             self.lease_client, must_acquire=True, return_at_exit=True
         )
+
+    def _force_acquire_lease(self) -> None:
+        """
+        Forcefully acquire the lease, taking it from any other client.
+
+        This will disconnect any other client (tablet, other script) that
+        currently holds the lease. Use with caution!
+
+        Note:
+            This uses take() instead of acquire(), which doesn't fail if
+            the lease is already held by another client.
+        """
+        self.lease_client = self.robot.ensure_client(LeaseClient.default_service_name)
+
+        # First, try to return any existing lease we might have
+        try:
+            self.lease_client.return_lease(self.lease_client.lease_wallet.get_lease())
+        except Exception:
+            pass  # No lease to return, that's fine
+
+        # Take the lease forcefully
+        self.lease_keepalive = LeaseKeepAlive(
+            self.lease_client,
+            must_acquire=True,
+            return_at_exit=True,
+        )
+        # The LeaseKeepAlive with must_acquire=True will take the lease
+        # We need to explicitly take it first
+        self.lease_client.take()
+        logger.warning("Forcefully took lease from previous owner")
 
     def _upload_graph_and_snapshots(self):
         """Upload the graph and snapshots to the robot."""

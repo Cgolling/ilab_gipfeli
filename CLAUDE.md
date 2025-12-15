@@ -66,7 +66,7 @@ Required in `.env` file (see `.env.example`):
 
 ### Three Main Components
 
-1. **Telegram Bot** (`src/telegram/echobot.py`) - User interface handling commands (`/start`, `/help`, `/connect`, `/goto`) and inline button callbacks for location selection
+1. **Telegram Bot** (`src/telegram/echobot.py`) - User interface handling commands (`/start`, `/help`, `/connect`, `/disconnect`, `/forceconnect`, `/status`, `/goto`) and inline button callbacks for location selection
 
 2. **SPOT Controller** (`src/spot/spot_controller.py`) - Robot control managing authentication, lease acquisition, map upload, fiducial-based localization, and GraphNav navigation
 
@@ -79,6 +79,8 @@ Required in `.env` file (see `.env.example`):
 - **Heartbeat pattern**: Navigation sends periodic 3-second updates with elapsed time
 - **Global state**: Single `SpotController` instance shared across Telegram handlers
 - **Waypoint mapping**: Locations use 2-letter short codes (from `WAYPOINTS` dict) mapped to full GraphNav waypoint IDs
+- **Graceful shutdown**: `post_shutdown` hook automatically releases lease when bot stops (Ctrl+C/SIGTERM)
+- **Force acquire**: `/forceconnect` can take lease from crashed bots or tablet without manual intervention
 
 ### Waypoint Locations
 

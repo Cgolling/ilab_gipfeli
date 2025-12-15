@@ -56,6 +56,9 @@ Respond to `/commands`:
 | `/start` | `start()` | Greet new users |
 | `/help` | `help_command()` | Show available commands |
 | `/connect` | `connect_spot()` | Connect to SPOT robot |
+| `/disconnect` | `disconnect_spot()` | Release lease and disconnect |
+| `/forceconnect` | `forceconnect_spot()` | Force take lease from any client |
+| `/status` | `status_spot()` | Show robot status (battery, motors, lease) |
 | `/goto` | `goto()` | Show location buttons |
 
 ### Callback Handler
@@ -124,9 +127,11 @@ spot_controller: Optional[SpotController] = None
 
 **Trade-off**: Not ideal for testing (we use `patch` to mock it).
 
-## Auto-Connect on Startup
+## Lifecycle Hooks
 
-The bot automatically tries to connect when it starts:
+The bot uses lifecycle hooks to manage SPOT connection automatically.
+
+### Auto-Connect on Startup
 
 ```python
 async def post_init(application):
@@ -136,6 +141,32 @@ async def post_init(application):
 ```
 
 If auto-connect fails, users can manually connect with `/connect`.
+
+### Graceful Shutdown
+
+When the bot stops (Ctrl+C or SIGTERM), it automatically releases the lease:
+
+```python
+async def post_shutdown(application):
+    # Called when bot is shutting down
+    if spot_controller and spot_controller.is_connected:
+        await spot_controller.disconnect()
+```
+
+**Why this matters**: Without graceful shutdown, the lease stays "claimed" and you can't reconnect without using `/forceconnect` or the tablet.
+
+```
+Bot running → Ctrl+C pressed
+                    │
+                    ▼
+            post_shutdown() called
+                    │
+                    ▼
+            Lease released cleanly
+                    │
+                    ▼
+            Next start → Can acquire lease!
+```
 
 ## Message Flow Diagram
 
@@ -150,11 +181,18 @@ User Action          Bot Response              Robot Action
                      "Map uploaded"       ←    Graph loaded
                      "Localized!"         ←    Position found
                      "SPOT ready!"
+/status         →    Connection, battery,
+                     motors, lease info
 /goto           →    [Button menu]
 [Tap "Aula"]    →    "Navigating..."      →    Start moving
                      "Navigating (3s)"    ←    Heartbeat
                      "Navigating (6s)"    ←    Heartbeat
                      "Arrived at Aula!"   ←    Goal reached
+/disconnect     →    "Disconnecting..."   →    Release lease
+                     "Disconnected"
+/forceconnect   →    "Force connecting..."→    Take lease
+                     "Lease forcefully        from any client
+                      acquired"
 ```
 
 ## Error Handling
@@ -181,6 +219,15 @@ Users see friendly error messages, not stack traces.
 | `src/telegram/echobot.py` | Main bot code |
 | `src/logging_config.py` | Logging setup |
 | `.env` | Bot token (secret!) |
+
+## Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| Can't connect after restart | Use `/forceconnect` to take lease |
+| "Lease already claimed" | Someone else has control - use `/forceconnect` |
+| Bot unresponsive | Check `logs/telegram.log` for errors |
+| Unknown connection state | Use `/status` to check robot state |
 
 ## Further Reading
 

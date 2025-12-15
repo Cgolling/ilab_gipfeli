@@ -59,11 +59,16 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """Send a message when the command /help is issued."""
     await update.message.reply_text(
         "SPOT Robot Control Bot\n\n"
-        "Commands:\n"
-        "/start - Start the bot\n"
-        "/help - Show this help message\n"
+        "Connection:\n"
         "/connect - Connect to SPOT robot\n"
-        "/goto - Navigate to a location"
+        "/disconnect - Disconnect and release lease\n"
+        "/forceconnect - Force take control (use if stuck!)\n"
+        "/status - Show robot status\n\n"
+        "Navigation:\n"
+        "/goto - Navigate to a location\n\n"
+        "Other:\n"
+        "/start - Start the bot\n"
+        "/help - Show this help message"
     )
 
 
@@ -89,7 +94,111 @@ async def connect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("SPOT is ready! Use /goto to navigate.")
     else:
         logger.warning("SPOT connection failed via /connect command")
-        await update.message.reply_text("SPOT connection failed. Use /connect to retry.")
+
+
+async def forceconnect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Force connect to SPOT robot, taking the lease from any other client."""
+    global spot_controller
+
+    hostname = os.getenv("SPOT_HOSTNAME", DEFAULT_SPOT_HOSTNAME)
+    map_path = DEFAULT_MAP_PATH
+
+    logger.warning(f"User initiated /forceconnect to SPOT at {hostname}")
+    await update.message.reply_text(
+        "FORCE CONNECT: Taking control from any other client...\n"
+        "(This will disconnect tablet or other scripts!)"
+    )
+
+    # Disconnect existing controller if any
+    if spot_controller and spot_controller.is_connected:
+        try:
+            await spot_controller.disconnect()
+        except Exception:
+            pass
+
+    spot_controller = SpotController(hostname, map_path)
+
+    async def send_status(msg: str):
+        await update.message.reply_text(msg)
+
+    success = await spot_controller.connect(send_status, force_acquire=True)
+
+    if success:
+        logger.info("SPOT force-connection successful")
+        await update.message.reply_text("SPOT is ready! Lease forcefully acquired.")
+    else:
+        logger.warning("SPOT force-connection failed")
+        await update.message.reply_text("Force connection failed. Check logs.")
+
+
+async def disconnect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Disconnect from SPOT and release the lease."""
+    global spot_controller
+
+    if spot_controller is None:
+        await update.message.reply_text("Not connected to SPOT.")
+        return
+
+    logger.info("User initiated /disconnect")
+    await update.message.reply_text("Disconnecting from SPOT...")
+
+    try:
+        await spot_controller.disconnect()
+        await update.message.reply_text(
+            "Disconnected from SPOT. Lease released.\n"
+            "Use /connect to reconnect."
+        )
+        logger.info("Successfully disconnected from SPOT")
+    except Exception as e:
+        logger.exception(f"Error during disconnect: {e}")
+        await update.message.reply_text(f"Error disconnecting: {e}")
+
+
+async def status_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show current SPOT robot status."""
+    if spot_controller is None:
+        await update.message.reply_text(
+            "SPOT Status: Not initialized\n\n"
+            "Use /connect to connect to the robot."
+        )
+        return
+
+    try:
+        status = spot_controller.get_status()
+
+        # Build status message
+        lines = ["SPOT Status:\n"]
+
+        # Connection
+        if status["connected"]:
+            lines.append("Connected: Yes")
+        else:
+            lines.append("Connected: No")
+
+        lines.append(f"Hostname: {status['hostname']}")
+
+        # Power state
+        if status["powered_on"] is not None:
+            power_str = "Standing" if status["powered_on"] else "Sitting"
+            lines.append(f"Motors: {power_str}")
+
+        # Battery
+        if status["battery_percent"] is not None:
+            lines.append(f"Battery: {status['battery_percent']:.0f}%")
+
+        # E-stop
+        if status["estop_status"]:
+            lines.append(f"E-Stop: {status['estop_status']}")
+
+        # Lease owner
+        if status["lease_owner"]:
+            lines.append(f"Lease Owner: {status['lease_owner']}")
+
+        await update.message.reply_text("\n".join(lines))
+
+    except Exception as e:
+        logger.exception(f"Error getting status: {e}")
+        await update.message.reply_text(f"Error getting status: {e}")
 
 
 async def goto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -182,6 +291,32 @@ async def post_init(application: Application) -> None:
         logger.warning(f"SPOT auto-connect failed: {e}. Use /connect to retry.")
 
 
+async def post_shutdown(application: Application) -> None:
+    """
+    Gracefully disconnect from SPOT when the bot shuts down.
+
+    This is called when the bot receives SIGINT (Ctrl+C) or SIGTERM,
+    ensuring the lease is properly released so reconnection is possible.
+    """
+    global spot_controller
+
+    logger.info("Bot shutting down - releasing SPOT resources...")
+
+    if spot_controller is not None:
+        try:
+            if spot_controller.is_connected:
+                await spot_controller.disconnect()
+                logger.info("SPOT disconnected successfully during shutdown")
+            else:
+                logger.info("SPOT was not connected, nothing to disconnect")
+        except Exception as e:
+            logger.error(f"Error disconnecting SPOT during shutdown: {e}")
+        finally:
+            spot_controller = None
+
+    logger.info("Shutdown complete")
+
+
 def main() -> None:
     """Start the bot."""
     load_dotenv()
@@ -189,21 +324,36 @@ def main() -> None:
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN not found in environment variables")
 
-    # Create the Application with post_init for auto-connect
-    application = Application.builder().token(token).post_init(post_init).build()
+    # Create the Application with lifecycle hooks
+    application = (
+        Application.builder()
+        .token(token)
+        .post_init(post_init)        # Auto-connect on startup
+        .post_shutdown(post_shutdown) # Release lease on shutdown
+        .build()
+    )
 
-    # on different commands - answer in Telegram
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
+    # Connection commands
     application.add_handler(CommandHandler("connect", connect_spot))
+    application.add_handler(CommandHandler("forceconnect", forceconnect_spot))
+    application.add_handler(CommandHandler("disconnect", disconnect_spot))
+    application.add_handler(CommandHandler("status", status_spot))
+
+    # Navigation commands
     application.add_handler(CommandHandler("goto", goto))
     application.add_handler(CallbackQueryHandler(goto_callback, pattern=f"^{CALLBACK_DATA_PREFIX}"))
+
+    # General commands
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
 
     # on non command i.e message - echo the message on Telegram
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
     # handle unknown commands
     application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
+
+    logger.info("Starting bot with graceful shutdown enabled...")
 
     # Run the bot until the user presses Ctrl-C
     application.run_polling(allowed_updates=Update.ALL_TYPES)
