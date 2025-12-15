@@ -1,0 +1,188 @@
+# Telegram Bot Architecture
+
+This document explains how the Telegram bot component works at a conceptual level.
+
+## Overview
+
+The Telegram bot serves as the **user interface** for the Gipfeli delivery system. Students interact with SPOT through Telegram messages and button presses, never directly with the robot.
+
+```
+┌─────────────┐      ┌─────────────┐      ┌─────────────┐
+│   Student   │ ──▶  │  Telegram   │ ──▶  │    SPOT     │
+│   (Phone)   │      │     Bot     │      │   Robot     │
+└─────────────┘      └─────────────┘      └─────────────┘
+     User              Interface           Hardware
+```
+
+## How Telegram Bots Work
+
+Telegram bots are programs that receive messages from users and respond. The key concepts:
+
+1. **Bot Token**: A secret key from BotFather that identifies your bot
+2. **Updates**: Messages/events from users (commands, button clicks)
+3. **Handlers**: Functions that process specific types of updates
+4. **Polling**: Continuously asking Telegram "any new messages?"
+
+## Command Flow
+
+When a user sends `/goto`:
+
+```
+1. User taps "/goto" in Telegram
+         │
+         ▼
+2. Telegram servers receive the message
+         │
+         ▼
+3. Our bot (polling) fetches the update
+         │
+         ▼
+4. CommandHandler("goto", goto) matches it
+         │
+         ▼
+5. goto() function runs, sends button menu
+         │
+         ▼
+6. User sees location buttons in chat
+```
+
+## Handlers Explained
+
+### Command Handlers
+Respond to `/commands`:
+
+| Command | Handler | Purpose |
+|---------|---------|---------|
+| `/start` | `start()` | Greet new users |
+| `/help` | `help_command()` | Show available commands |
+| `/connect` | `connect_spot()` | Connect to SPOT robot |
+| `/goto` | `goto()` | Show location buttons |
+
+### Callback Handler
+Responds to **inline button presses**:
+
+```python
+# When user taps "Aula" button:
+callback_data = "goto_aula"
+           │
+           ▼
+CallbackQueryHandler(goto_callback, pattern="^goto_")
+           │
+           ▼
+goto_callback() extracts "aula" and navigates
+```
+
+## Async/Await Pattern
+
+All handlers are `async` functions. This is important because:
+
+1. **Non-blocking**: Bot can handle multiple users simultaneously
+2. **Status updates**: Long operations (navigation) can send progress messages
+3. **Telegram requirement**: The library requires async handlers
+
+```python
+async def connect_spot(update, context):
+    # This doesn't block other users
+    await update.message.reply_text("Connecting...")
+
+    # Robot connection happens in background thread
+    success = await spot_controller.connect(send_status)
+
+    # Bot remains responsive during connection
+```
+
+## Status Callbacks
+
+For long-running operations, we pass a callback function:
+
+```python
+async def send_status(msg: str):
+    await update.message.reply_text(msg)
+
+# SpotController calls this during connection:
+# "Connecting to SPOT..."
+# "Authenticated with SPOT"
+# "Acquiring lease..."
+# "Lease acquired"
+# etc.
+```
+
+This keeps users informed during operations that take several seconds.
+
+## Global State
+
+The bot maintains one `SpotController` instance globally:
+
+```python
+spot_controller: Optional[SpotController] = None
+```
+
+**Why global?**
+- Only one robot connection needed
+- All handlers need access to the same controller
+- Telegram's async model is single-threaded, so this is safe
+
+**Trade-off**: Not ideal for testing (we use `patch` to mock it).
+
+## Auto-Connect on Startup
+
+The bot automatically tries to connect when it starts:
+
+```python
+async def post_init(application):
+    # Called once after bot starts
+    spot_controller = SpotController(hostname, map_path)
+    await spot_controller.connect(log_status)
+```
+
+If auto-connect fails, users can manually connect with `/connect`.
+
+## Message Flow Diagram
+
+```
+User Action          Bot Response              Robot Action
+───────────────────────────────────────────────────────────
+/start          →    "Hi [name]!"
+/help           →    Command list
+/connect        →    "Connecting..."      →    Authenticate
+                     "Authenticated"      ←    SDK connected
+                     "Lease acquired"     ←    Lease obtained
+                     "Map uploaded"       ←    Graph loaded
+                     "Localized!"         ←    Position found
+                     "SPOT ready!"
+/goto           →    [Button menu]
+[Tap "Aula"]    →    "Navigating..."      →    Start moving
+                     "Navigating (3s)"    ←    Heartbeat
+                     "Navigating (6s)"    ←    Heartbeat
+                     "Arrived at Aula!"   ←    Goal reached
+```
+
+## Error Handling
+
+The bot handles errors gracefully:
+
+```python
+try:
+    await query.edit_message_text(msg)
+except BadRequest:
+    # Message was deleted or already edited
+    logger.debug("Could not update message")
+except Exception as e:
+    # Unexpected error
+    logger.warning(f"Error: {e}")
+```
+
+Users see friendly error messages, not stack traces.
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `src/telegram/echobot.py` | Main bot code |
+| `src/logging_config.py` | Logging setup |
+| `.env` | Bot token (secret!) |
+
+## Further Reading
+
+- [python-telegram-bot docs](https://docs.python-telegram-bot.org/)
+- [Telegram Bot API](https://core.telegram.org/bots/api)
