@@ -261,6 +261,9 @@ ilab_gipfeli/
 | `/start` | Begrüssung und Übersicht |
 | `/help` | Liste aller Befehle |
 | `/connect` | Verbindung zu SPOT herstellen |
+| `/disconnect` | Verbindung trennen und Lease freigeben |
+| `/forceconnect` | Lease erzwingen (falls blockiert) |
+| `/status` | Roboter-Status anzeigen (Batterie, etc.) |
 | `/goto` | SPOT zu einem Standort navigieren |
 
 **Verfügbare Standorte für `/goto`:**
@@ -304,7 +307,9 @@ renderWindow.Start()
 ```
 
 ### "Lease already claimed"
-Der SPOT Roboter wird bereits von einem anderen Gerät (z.B. Tablet) gesteuert. Trenne die andere Verbindung zuerst.
+Der SPOT Roboter wird bereits von einem anderen Gerät (z.B. Tablet) gesteuert. Lösungen:
+1. Verwende `/forceconnect` um die Lease zu übernehmen
+2. Oder trenne die andere Verbindung zuerst (z.B. am Tablet)
 
 ---
 
