@@ -90,10 +90,29 @@ Defined in `src/spot/spot_controller.py`:
 - `Ha` - Hauswart (caretaker's room)
 - `Tu` - Turnhalle (gymnasium)
 
+## Map Viewer
+
+Interactive 3D visualization tool for GraphNav maps using Plotly. See [docs/map_viewer.md](docs/map_viewer.md) for full documentation.
+
+```bash
+# Install viewer dependencies
+uv sync --extra viewer
+
+# View map in browser with delivery locations highlighted
+uv run python -m src.map_viewer maps/map_catacombs_01/ -a --highlight al tv oh cw
+
+# Show point cloud data
+uv run python -m src.map_viewer maps/map_catacombs_01/ -a --show-point-clouds
+
+# Export to standalone HTML file
+uv run python -m src.map_viewer maps/map_catacombs_01/ --export map.html
+```
+
 ## Dependencies
 
 - Python >= 3.13
 - `python-telegram-bot` - Telegram bot framework
 - `bosdyn-client`, `bosdyn-mission` - Boston Dynamics SPOT SDK
 - `python-dotenv` - Environment variable management
+- `plotly` - Interactive visualization (optional, for map viewer)
 - `spot-sdk/` - Git submodule pointing to official Boston Dynamics SDK repository
