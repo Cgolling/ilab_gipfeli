@@ -449,10 +449,11 @@ class SpotController:
         self.lease_client = self.robot.ensure_client(LeaseClient.default_service_name)
 
         # First, try to return any existing lease we might have
+        assert self.lease_client is not None
         try:
             self.lease_client.return_lease(self.lease_client.lease_wallet.get_lease())
-        except Exception:
-            pass  # No lease to return, that's fine
+        except Exception as e:
+            logger.debug(f"Could not return existing lease (expected if we don't have one): {e}")
 
         # Take the lease forcefully
         self.lease_keepalive = LeaseKeepAlive(
