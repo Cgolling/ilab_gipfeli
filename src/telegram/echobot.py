@@ -19,20 +19,28 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from dotenv import load_dotenv
 from telegram import ForceReply, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
 from src.spot import SpotController
+from src.logging_config import setup_logging
 
-# Enable logging
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
-# set higher logging level for httpx to avoid all GET and POST requests being logged
-logging.getLogger("httpx").setLevel(logging.WARNING)
+# Initialize logging (safe to call multiple times)
+setup_logging()
 
 logger = logging.getLogger(__name__)
 
+# Configuration constants
+DEFAULT_SPOT_HOSTNAME = "192.168.80.3"
+DEFAULT_MAP_PATH = "maps/map_catacombs_01"
+CALLBACK_DATA_PREFIX = "goto_"
+
 # Global SPOT controller instance
+# Thread-safety note: python-telegram-bot uses a single-threaded async model,
+# so concurrent access to this variable is safe within Telegram handlers.
+# The SpotController itself wraps blocking SDK calls with asyncio.to_thread(),
+# which is also safe as those calls don't share mutable state.
+# Do NOT access this from external threads without proper synchronization.
 spot_controller: Optional[SpotController] = None
 
 
@@ -63,9 +71,10 @@ async def connect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """Connect to SPOT robot."""
     global spot_controller
 
-    hostname = os.getenv("SPOT_HOSTNAME", "192.168.80.3")
-    map_path = "maps/map_catacombs_01"
+    hostname = os.getenv("SPOT_HOSTNAME", DEFAULT_SPOT_HOSTNAME)
+    map_path = DEFAULT_MAP_PATH
 
+    logger.info(f"User initiated /connect to SPOT at {hostname}")
     await update.message.reply_text("Starting SPOT connection procedure...")
 
     spot_controller = SpotController(hostname, map_path)
@@ -76,8 +85,10 @@ async def connect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     success = await spot_controller.connect(send_status)
 
     if success:
+        logger.info("SPOT connection successful via /connect command")
         await update.message.reply_text("SPOT is ready! Use /goto to navigate.")
     else:
+        logger.warning("SPOT connection failed via /connect command")
         await update.message.reply_text("SPOT connection failed. Use /connect to retry.")
 
 
@@ -85,12 +96,12 @@ async def goto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send inline keyboard with location options."""
     keyboard = [
         [
-            InlineKeyboardButton("Aula", callback_data="goto_aula"),
-            InlineKeyboardButton("Triangle", callback_data="goto_triangle"),
+            InlineKeyboardButton("Aula", callback_data=f"{CALLBACK_DATA_PREFIX}aula"),
+            InlineKeyboardButton("Triangle", callback_data=f"{CALLBACK_DATA_PREFIX}triangle"),
         ],
         [
-            InlineKeyboardButton("Hauswart", callback_data="goto_hauswart"),
-            InlineKeyboardButton("Turnhalle", callback_data="goto_turnhalle"),
+            InlineKeyboardButton("Hauswart", callback_data=f"{CALLBACK_DATA_PREFIX}hauswart"),
+            InlineKeyboardButton("Turnhalle", callback_data=f"{CALLBACK_DATA_PREFIX}turnhalle"),
         ],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -102,7 +113,7 @@ async def goto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     query = update.callback_query
     await query.answer()
 
-    location = query.data.replace("goto_", "")
+    location = query.data.replace(CALLBACK_DATA_PREFIX, "")
 
     # Check if SPOT is connected
     if spot_controller is None or not spot_controller.is_connected:
@@ -113,14 +124,21 @@ async def goto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     async def send_status(msg: str):
         try:
             await query.edit_message_text(msg)
-        except Exception:
-            pass  # Message might have been deleted or edited already
+        except BadRequest as e:
+            # Expected: message not modified, deleted, or user blocked bot
+            logger.debug(f"Could not update status message: {e}")
+        except Exception as e:
+            # Unexpected error - log for debugging
+            logger.warning(f"Unexpected error updating status message: {e}")
 
+    logger.info(f"User requested navigation to: {location}")
     success = await spot_controller.navigate_to(location, send_status)
 
     if success:
+        logger.info(f"Navigation to {location} completed successfully")
         await query.edit_message_text(f"Arrived at {location.title()}!")
     else:
+        logger.warning(f"Navigation to {location} failed")
         await query.edit_message_text(f"Failed to navigate to {location.title()}")
 
 
@@ -145,8 +163,8 @@ async def post_init(application: Application) -> None:
     """Try to connect to SPOT once on startup."""
     global spot_controller
 
-    hostname = os.getenv("SPOT_HOSTNAME", "192.168.80.3")
-    map_path = "maps/map_catacombs_01"
+    hostname = os.getenv("SPOT_HOSTNAME", DEFAULT_SPOT_HOSTNAME)
+    map_path = DEFAULT_MAP_PATH
 
     logger.info(f"Attempting auto-connect to SPOT at {hostname}...")
     spot_controller = SpotController(hostname, map_path)
@@ -179,7 +197,7 @@ def main() -> None:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("connect", connect_spot))
     application.add_handler(CommandHandler("goto", goto))
-    application.add_handler(CallbackQueryHandler(goto_callback, pattern="^goto_"))
+    application.add_handler(CallbackQueryHandler(goto_callback, pattern=f"^{CALLBACK_DATA_PREFIX}"))
 
     # on non command i.e message - echo the message on Telegram
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))

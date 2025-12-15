@@ -6,6 +6,11 @@ import os
 import time
 from typing import Awaitable, Callable, Optional
 
+from src.logging_config import setup_logging
+
+# Initialize logging (safe to call multiple times)
+setup_logging()
+
 import bosdyn.client
 import bosdyn.client.util
 from bosdyn.api import robot_state_pb2
@@ -28,43 +33,135 @@ WAYPOINTS = {
     "turnhalle": "cw",
 }
 
+# Timing constants (seconds)
+HEARTBEAT_INTERVAL_SECONDS = 3       # How often to send status updates during navigation
+NAVIGATION_VELOCITY_LIMIT = 1.0      # Max velocity limit passed to navigate_to (m/s)
+NAVIGATION_POLL_INTERVAL = 0.5       # How often to poll navigation status
+POWER_STATE_POLL_INTERVAL = 0.25     # How often to poll power state during power-on
+
 
 def id_to_short_code(waypoint_id: str) -> Optional[str]:
-    """Convert a unique id to a 2 letter short code."""
+    """
+    Convert a waypoint ID to a 2-letter short code.
+
+    Short codes are derived from the first character of the first two
+    hyphen-separated tokens in the waypoint ID.
+
+    Args:
+        waypoint_id: Full waypoint ID (e.g., "aula-vast-xyz-123")
+
+    Returns:
+        Two-letter short code (e.g., "av"), or None if the ID has
+        fewer than 3 hyphen-separated tokens.
+
+    Example:
+        >>> id_to_short_code("aula-vast-xyz-123")
+        "av"
+        >>> id_to_short_code("short")
+        None
+    """
     tokens = waypoint_id.split('-')
     if len(tokens) > 2:
         return f'{tokens[0][0]}{tokens[1][0]}'
     return None
 
 
-def find_unique_waypoint_id(short_code: str, graph, name_to_id: dict) -> Optional[str]:
-    """Convert either a 2 letter short code or an annotation name into the associated unique id."""
+def find_unique_waypoint_id(identifier: str, graph, name_to_id: dict) -> Optional[str]:
+    """
+    Resolve a waypoint identifier to its full unique ID.
+
+    This function handles three types of identifiers:
+    1. Two-letter short codes (e.g., "al") - derived from waypoint IDs
+    2. Annotation names (e.g., "aula") - human-readable names from map recording
+    3. Full waypoint IDs - returned as-is if not matching the above
+
+    Args:
+        identifier: A short code, annotation name, or full waypoint ID
+        graph: The loaded GraphNav graph (map_pb2.Graph)
+        name_to_id: Mapping of annotation names to waypoint IDs.
+            Value is None if the name is ambiguous (used by multiple waypoints).
+
+    Returns:
+        The full waypoint ID string, or None if:
+        - Graph is not loaded
+        - Annotation name is ambiguous (maps to multiple waypoints)
+    """
     if graph is None:
         logger.error("Graph not loaded. Cannot find waypoint.")
         return None
 
-    if len(short_code) != 2:
-        # Not a short code, check if it is an annotation name
-        if short_code in name_to_id:
-            if name_to_id[short_code] is not None:
-                return name_to_id[short_code]
-            else:
-                logger.error(f"Waypoint name {short_code} is used for multiple waypoints.")
-                return None
-        # Assume it's a unique waypoint id
-        return short_code
+    # Route to appropriate resolver based on identifier length
+    if len(identifier) == 2:
+        return _resolve_short_code(identifier, graph)
+    return _resolve_annotation_or_raw_id(identifier, name_to_id)
 
-    ret = short_code
+
+def _resolve_short_code(short_code: str, graph) -> str:
+    """
+    Resolve a 2-letter short code to a full waypoint ID.
+
+    Searches all waypoints in the graph for one whose ID produces
+    the given short code.
+
+    Args:
+        short_code: Two-letter code to resolve
+        graph: The loaded GraphNav graph
+
+    Returns:
+        The full waypoint ID if exactly one match is found.
+        The original short_code if no match or multiple matches
+        (caller should handle as navigation error).
+    """
+    matched_id = None
     for waypoint in graph.waypoints:
         if short_code == id_to_short_code(waypoint.id):
-            if ret != short_code:
-                return short_code  # Multiple waypoints with same short code
-            ret = waypoint.id
-    return ret
+            if matched_id is not None:
+                # Multiple matches found - return original to surface ambiguity
+                logger.warning(f"Short code '{short_code}' matches multiple waypoints")
+                return short_code
+            matched_id = waypoint.id
+
+    return matched_id if matched_id else short_code
+
+
+def _resolve_annotation_or_raw_id(identifier: str, name_to_id: dict) -> Optional[str]:
+    """
+    Resolve an annotation name from the mapping, or return as raw ID.
+
+    Args:
+        identifier: Annotation name or full waypoint ID
+        name_to_id: Mapping of annotation names to waypoint IDs
+
+    Returns:
+        The resolved waypoint ID, or None if the annotation is ambiguous.
+        If identifier is not in the mapping, it's assumed to be a raw
+        waypoint ID and returned as-is.
+    """
+    if identifier in name_to_id:
+        waypoint_id = name_to_id[identifier]
+        if waypoint_id is None:
+            logger.error(f"Waypoint name '{identifier}' is ambiguous (maps to multiple waypoints).")
+            return None
+        return waypoint_id
+    # Assume it's already a full waypoint ID
+    return identifier
 
 
 def update_waypoints_and_edges(graph, localization_id: str) -> tuple[dict, dict]:
-    """Update waypoint names to ids mapping and edges."""
+    """
+    Build mappings from graph for waypoint name lookup and edge connectivity.
+
+    Args:
+        graph: The loaded GraphNav graph (map_pb2.Graph)
+        localization_id: Current localization waypoint ID (not used but kept for API)
+
+    Returns:
+        Tuple of (name_to_id, edges) where:
+        - name_to_id: Dict mapping annotation names to waypoint IDs.
+          Value is None if the name appears on multiple waypoints (ambiguous).
+        - edges: Dict mapping destination waypoint IDs to lists of source
+          waypoint IDs (reverse edge lookup for pathfinding).
+    """
     name_to_id = {}
     edges = {}
 
@@ -89,7 +186,30 @@ def update_waypoints_and_edges(graph, localization_id: str) -> tuple[dict, dict]
 class SpotController:
     """Controller for Boston Dynamics SPOT robot using GraphNav."""
 
-    def __init__(self, hostname: str, map_path: str):
+    def __init__(self, hostname: str, map_path: str) -> None:
+        """
+        Initialize a SpotController for robot navigation.
+
+        Args:
+            hostname: IP address or hostname of the SPOT robot
+                (e.g., "192.168.80.3")
+            map_path: Path to the GraphNav map directory containing
+                'graph', 'waypoint_snapshots/', and 'edge_snapshots/'
+
+        Attributes:
+            robot: Boston Dynamics Robot client (None until connect())
+            lease_client: Client for lease management
+            lease_keepalive: Automatic lease renewal handler
+            graph_nav_client: Client for GraphNav operations
+            robot_command_client: Client for robot commands
+            robot_state_client: Client for querying robot state
+            power_client: Client for power management
+
+        Example:
+            controller = SpotController("192.168.80.3", "maps/school_v1")
+            await controller.connect(status_callback)
+            await controller.navigate_to("aula", status_callback)
+        """
         self.hostname = hostname
         self.map_path = map_path.rstrip('/')
 
@@ -109,7 +229,12 @@ class SpotController:
         self._current_annotation_name_to_wp_id = {}
         self._current_edges = {}
 
-        # Power state
+        # Power state tracking:
+        # - _powered_on: Current motor power state, updated by _check_is_powered_on()
+        # - _started_powered_on: Captured at connection time. If we powered on the
+        #   robot during navigation, we power it off after. If it was already on
+        #   (e.g., user had it standing), we leave it on. This prevents unexpected
+        #   sit-downs.
         self._powered_on = False
         self._started_powered_on = False
 
@@ -140,6 +265,7 @@ class SpotController:
             # Step 2: Acquire lease
             await status_callback("Acquiring lease...")
             await asyncio.to_thread(self._acquire_lease)
+            logger.info("Lease acquired successfully, keepalive started")
             await status_callback("Lease acquired")
 
             # Step 3: Upload map
@@ -193,9 +319,25 @@ class SpotController:
         power_state = self.robot_state_client.get_robot_state().power_state
         self._started_powered_on = (power_state.motor_power_state == power_state.STATE_ON)
         self._powered_on = self._started_powered_on
+        logger.info(f"Initial power state: motors_on={self._started_powered_on}")
 
-    def _acquire_lease(self):
-        """Acquire lease for robot control."""
+    def _acquire_lease(self) -> None:
+        """
+        Acquire exclusive control lease for the SPOT robot.
+
+        Creates a LeaseKeepAlive that automatically maintains the lease
+        with periodic heartbeats. The lease is returned when the
+        keepalive is shutdown or the program exits (return_at_exit=True).
+
+        Raises:
+            ResourceAlreadyClaimedError: If another client (e.g., tablet
+                controller, another script) already holds the lease.
+                Check for tablet connections if this fails.
+
+        Note:
+            Only one client can hold the robot lease at a time. The lease
+            grants exclusive control over the robot's movement and power.
+        """
         self.lease_client = self.robot.ensure_client(LeaseClient.default_service_name)
         self.lease_keepalive = LeaseKeepAlive(
             self.lease_client, must_acquire=True, return_at_exit=True
@@ -315,10 +457,12 @@ class SpotController:
             await status_callback(f"Powering on robot...")
             powered_on = await asyncio.to_thread(self._toggle_power, True)
             if not powered_on:
+                logger.error("Failed to power on robot motors")
                 await status_callback("Failed to power on robot")
                 return False
 
             # Navigate with heartbeat updates
+            logger.info(f"Starting navigation to {location} (waypoint: {destination_waypoint})")
             await status_callback(f"Navigating to {location.title()}...")
             success = await self._navigate_to_waypoint_with_heartbeat(
                 destination_waypoint,
@@ -351,8 +495,9 @@ class SpotController:
         while True:
             elapsed = int(time.time() - start_time)
 
-            # Send heartbeat update every 3 seconds
-            if elapsed - last_update >= 3:
+            # Send heartbeat update every HEARTBEAT_INTERVAL_SECONDS
+            if elapsed - last_update >= HEARTBEAT_INTERVAL_SECONDS:
+                logger.debug(f"Navigation heartbeat: {location} ({elapsed}s elapsed)")
                 await status_callback(f"Navigating to {location.title()}... ({elapsed}s)")
                 last_update = elapsed
 
@@ -361,7 +506,7 @@ class SpotController:
                 nav_to_cmd_id = await asyncio.to_thread(
                     self.graph_nav_client.navigate_to,
                     destination_waypoint,
-                    1.0,
+                    NAVIGATION_VELOCITY_LIMIT,
                     command_id=nav_to_cmd_id
                 )
             except ResponseError as e:
@@ -378,23 +523,29 @@ class SpotController:
                     await status_callback(status_msg)
                 return status_msg is None  # None means success
 
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(NAVIGATION_POLL_INTERVAL)
 
     def _toggle_power(self, should_power_on: bool) -> bool:
         """Power the robot on/off."""
         is_powered_on = self._check_is_powered_on()
+        logger.debug(f"Power toggle: current={is_powered_on}, target={should_power_on}")
 
         if not is_powered_on and should_power_on:
+            logger.info("Powering on motors...")
             power_on_motors(self.power_client)
             # Wait for motors to power on
+            start_time = time.time()
             while True:
                 state = self.robot_state_client.get_robot_state()
                 if state.power_state.motor_power_state == robot_state_pb2.PowerState.STATE_ON:
+                    logger.info(f"Motors powered on in {time.time() - start_time:.2f}s")
                     break
-                time.sleep(0.25)
+                time.sleep(POWER_STATE_POLL_INTERVAL)
 
         elif is_powered_on and not should_power_on:
+            logger.info("Powering off motors...")
             safe_power_off_motors(self.robot_command_client, self.robot_state_client)
+            logger.info("Motors powered off")
 
         self._check_is_powered_on()
         return self._powered_on
@@ -418,12 +569,16 @@ class SpotController:
         status = self.graph_nav_client.navigation_feedback(command_id)
 
         if status.status == graph_nav_pb2.NavigationFeedbackResponse.STATUS_REACHED_GOAL:
+            logger.info("Navigation completed: reached goal")
             return True, None  # Success
         elif status.status == graph_nav_pb2.NavigationFeedbackResponse.STATUS_LOST:
+            logger.warning("Navigation failed: robot got lost")
             return True, "Robot got lost during navigation"
         elif status.status == graph_nav_pb2.NavigationFeedbackResponse.STATUS_STUCK:
+            logger.warning("Navigation failed: robot got stuck")
             return True, "Robot got stuck during navigation"
         elif status.status == graph_nav_pb2.NavigationFeedbackResponse.STATUS_ROBOT_IMPAIRED:
+            logger.warning("Navigation failed: robot is impaired")
             return True, "Robot is impaired"
         else:
             return False, None  # Still navigating
