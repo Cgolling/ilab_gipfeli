@@ -6,4 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "python-telegram-bot>=22.5",
+    "bosdyn-client>=4.0.0",
+    "bosdyn-mission>=4.0.0",
+    "python-dotenv>=1.0.0",
 ]
