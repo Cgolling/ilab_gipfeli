@@ -18,6 +18,9 @@ dev = [
     "pytest-cov>=4.1.0",
     "pytest-mock>=3.12.0",
 ]
+viewer = [
+    "plotly>=5.18.0",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
