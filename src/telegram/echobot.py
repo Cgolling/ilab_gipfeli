@@ -49,6 +49,8 @@ spot_controller: Optional[SpotController] = None
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /start is issued."""
     user = update.effective_user
+    if not update.message or not user:
+        return
     await update.message.reply_html(
         rf"Hi {user.mention_html()}!",
         reply_markup=ForceReply(selective=True),
@@ -57,6 +59,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
+     
+    if not update.message:
+        return
+    
     await update.message.reply_text(
         "SPOT Robot Control Bot\n\n"
         "Connection:\n"
@@ -75,6 +81,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def connect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Connect to SPOT robot."""
     global spot_controller
+    
+    if not update.message:
+        return
 
     hostname = os.getenv("SPOT_HOSTNAME", DEFAULT_SPOT_HOSTNAME)
     map_path = DEFAULT_MAP_PATH
@@ -85,6 +94,8 @@ async def connect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     spot_controller = SpotController(hostname, map_path)
 
     async def send_status(msg: str):
+        if not update.message:
+            return
         await update.message.reply_text(msg)
 
     success = await spot_controller.connect(send_status)
@@ -99,6 +110,8 @@ async def connect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def forceconnect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Force connect to SPOT robot, taking the lease from any other client."""
     global spot_controller
+    if not update.message:
+        return
 
     hostname = os.getenv("SPOT_HOSTNAME", DEFAULT_SPOT_HOSTNAME)
     map_path = DEFAULT_MAP_PATH
@@ -119,6 +132,8 @@ async def forceconnect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     spot_controller = SpotController(hostname, map_path)
 
     async def send_status(msg: str):
+        if not update.message:
+            return
         await update.message.reply_text(msg)
 
     success = await spot_controller.connect(send_status, force_acquire=True)
@@ -134,6 +149,8 @@ async def forceconnect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def disconnect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Disconnect from SPOT and release the lease."""
     global spot_controller
+    if not update.message:
+        return
 
     if spot_controller is None:
         await update.message.reply_text("Not connected to SPOT.")
@@ -156,6 +173,9 @@ async def disconnect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def status_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show current SPOT robot status."""
+    if not update.message:
+        return
+    
     if spot_controller is None:
         await update.message.reply_text(
             "SPOT Status: Not initialized\n\n"
@@ -203,6 +223,8 @@ async def status_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def goto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send inline keyboard with location options."""
+    if not update.message:
+        return
     keyboard = [
         [
             InlineKeyboardButton("Aula", callback_data=f"{CALLBACK_DATA_PREFIX}aula"),
@@ -219,8 +241,14 @@ async def goto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def goto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle goto button presses and navigate SPOT to the selected location."""
+    if not update.callback_query:
+        return
+    
     query = update.callback_query
     await query.answer()
+
+    if not query.data:
+        return
 
     location = query.data.replace(CALLBACK_DATA_PREFIX, "")
 
@@ -253,11 +281,15 @@ async def goto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Echo the user message."""
+    if not (update.message and update.message.text):
+        return
     await update.message.reply_text(update.message.text)
 
 
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Inform the user that the command was not found."""
+    if not update.message:
+        return
     await update.message.reply_text(
         "Sorry, I didn't understand that command.\n\n"
         "Available commands:\n"
