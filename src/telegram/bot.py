@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from dotenv import load_dotenv
 from telegram import ForceReply, Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import BadRequest
+from telegram.error import BadRequest, NetworkError
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
 from src.spot import SpotController
@@ -350,6 +350,14 @@ async def post_shutdown(application: Application) -> None:
     logger.info("Shutdown complete")
 
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle errors - log network errors concisely, others with full traceback."""
+    if isinstance(context.error, NetworkError):
+        logger.warning(f"Network error (will retry): {context.error}")
+    else:
+        logger.exception("Unhandled exception:", exc_info=context.error)
+
+
 def main() -> None:
     """Start the bot."""
     load_dotenv()
@@ -385,6 +393,9 @@ def main() -> None:
 
     # handle unknown commands
     application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
+
+    # Error handler for cleaner logging
+    application.add_error_handler(error_handler)
 
     logger.info("Starting bot with graceful shutdown enabled...")
 
