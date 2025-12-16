@@ -7,51 +7,52 @@ This document explains how the SPOT robot controller works at a conceptual level
 The `SpotController` manages all communication with the Boston Dynamics SPOT robot. It handles authentication, control permissions, map loading, and navigation.
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    SpotController                        │
-├─────────────────────────────────────────────────────────┤
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐   │
-│  │  Auth   │  │  Lease  │  │ GraphNav│  │  Power  │   │
-│  │ Client  │  │ Client  │  │ Client  │  │ Client  │   │
-│  └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘   │
-│       │            │            │            │         │
-│       └────────────┴─────┬──────┴────────────┘         │
-│                          │                              │
-│                    ┌─────▼─────┐                        │
-│                    │   Robot   │                        │
-│                    │   (SDK)   │                        │
-│                    └─────┬─────┘                        │
-└──────────────────────────┼──────────────────────────────┘
-                           │
-                    ┌──────▼──────┐
-                    │  SPOT Robot │
-                    │  (Hardware) │
-                    └─────────────┘
++-----------------------------------------------------------+
+|                     SpotController                        |
++-----------------------------------------------------------+
+|  +---------+  +---------+  +---------+  +---------+       |
+|  |  Auth   |  |  Lease  |  | GraphNav|  |  Power  |       |
+|  | Client  |  | Client  |  | Client  |  | Client  |       |
+|  +----+----+  +----+----+  +----+----+  +----+----+       |
+|       |            |            |            |            |
+|       +------------+-----+------+------------+            |
+|                          |                                |
+|                    +-----v-----+                          |
+|                    |   Robot   |                          |
+|                    |   (SDK)   |                          |
+|                    +-----+-----+                          |
++--------------------------|--------------------------------+
+                           |
+                    +------v------+
+                    |  SPOT Robot |
+                    |  (Hardware) |
+                    +-------------+
 ```
 
+\newpage
 ## The Lease System
 
 **Why leases?** SPOT can only be controlled by one client at a time. The lease system prevents conflicting commands.
 
 ```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│   Tablet     │     │   Our Bot    │     │ Other Script │
-│  Controller  │     │              │     │              │
-└──────┬───────┘     └──────┬───────┘     └──────┬───────┘
-       │                    │                    │
-       ▼                    ▼                    ▼
++--------------+     +--------------+     +--------------+
+|   Tablet     |     |   Our Bot    |     | Other Script |
+|  Controller  |     |              |     |              |
++------+-------+     +------+-------+     +------+-------+
+       |                    |                    |
+       v                    v                    v
     [HAS LEASE]         [WAITING]           [WAITING]
-       │                    │                    │
-       │ (user releases)    │                    │
-       ▼                    │                    │
-    [RELEASED]              │                    │
-                            ▼                    │
-                        [HAS LEASE]              │
-                            │                    │
-                            │ (disconnect)       │
-                            ▼                    │
-                        [RELEASED]               │
-                                                 ▼
+       |                    |                    |
+       | (user releases)    |                    |
+       v                    |                    |
+    [RELEASED]              |                    |
+                            v                    |
+                        [HAS LEASE]              |
+                            |                    |
+                            | (disconnect)       |
+                            v                    |
+                        [RELEASED]               |
+                                                 v
                                             [HAS LEASE]
 ```
 
@@ -69,6 +70,7 @@ self.lease_keepalive = LeaseKeepAlive(
 
 **Common issue**: If the tablet has the lease, our bot can't connect. Solution: Release control on tablet first.
 
+\newpage
 ## GraphNav: How Navigation Works
 
 SPOT uses **GraphNav** for autonomous navigation. Think of it as a pre-recorded "map" of waypoints and paths.
@@ -77,13 +79,13 @@ SPOT uses **GraphNav** for autonomous navigation. Think of it as a pre-recorded 
 
 ```
                     [Aula]
-                       │
-                       │ edge
-                       ▼
-    [Hauswart] ◀──── [Hub] ────▶ [Triangle]
-                       │
-                       │ edge
-                       ▼
+                       |
+                       | edge
+                       v
+    [Hauswart] <---- [Hub] ----> [Triangle]
+                       |
+                       | edge
+                       v
                   [Turnhalle]
 ```
 
@@ -95,16 +97,16 @@ SPOT uses **GraphNav** for autonomous navigation. Think of it as a pre-recorded 
 
 ```
 1. Load Graph from Disk
-   └── Read waypoints, edges, visual data
+   +-- Read waypoints, edges, visual data
 
 2. Upload to Robot
-   └── Robot now knows the map
+   +-- Robot now knows the map
 
 3. Localize Robot
-   └── Robot finds itself using visual markers (fiducials)
+   +-- Robot finds itself using visual markers (fiducials)
 
 4. Navigate to Waypoint
-   └── Robot plans path and walks there
+   +-- Robot plans path and walks there
 ```
 
 ## Waypoint Identification
@@ -121,10 +123,11 @@ Waypoints have complex IDs like `aula-vast-abc123-xyz789`. We use shortcuts:
 The `find_unique_waypoint_id()` function resolves these:
 
 ```python
-"aula"  →  looks up annotation name  →  full waypoint ID
-"al"    →  searches graph for match  →  full waypoint ID
+"aula"  ->  looks up annotation name  ->  full waypoint ID
+"al"    ->  searches graph for match  ->  full waypoint ID
 ```
 
+\newpage
 ## Connection Sequence
 
 ```python
@@ -135,28 +138,29 @@ This triggers a 4-step sequence:
 
 ```
 Step 1: Authenticate
-├── Create SDK instance
-├── Connect to robot IP
-├── Login with credentials
-└── Sync clocks
+|-- Create SDK instance
+|-- Connect to robot IP
+|-- Login with credentials
++-- Sync clocks
 
 Step 2: Acquire Lease
-├── Request exclusive control
-├── Start keepalive heartbeat
-└── (Fails if tablet has lease)
+|-- Request exclusive control
+|-- Start keepalive heartbeat
++-- (Fails if tablet has lease)
 
 Step 3: Upload Map
-├── Load graph from disk
-├── Load waypoint snapshots
-├── Load edge snapshots
-└── Upload all to robot
+|-- Load graph from disk
+|-- Load waypoint snapshots
+|-- Load edge snapshots
++-- Upload all to robot
 
 Step 4: Localize
-├── Robot looks for fiducial markers
-├── Matches to known positions
-└── Robot now knows where it is
+|-- Robot looks for fiducial markers
+|-- Matches to known positions
++-- Robot now knows where it is
 ```
 
+\newpage
 ## Power State Management
 
 SPOT's motors can be on (standing) or off (sitting). We track this:
@@ -186,7 +190,7 @@ Navigation takes time (30+ seconds). We send periodic status updates:
 
 ```
 Time     Status Callback              Robot State
-─────────────────────────────────────────────────
+---------------------------------------------
 0s       "Navigating to Aula..."      Starting
 3s       "Navigating to Aula (3s)"    Walking
 6s       "Navigating to Aula (6s)"    Walking
@@ -196,6 +200,7 @@ Time     Status Callback              Robot State
 
 This keeps users informed and confirms the bot isn't frozen.
 
+\newpage
 ## Async/Thread Boundary
 
 The SPOT SDK uses **blocking** calls, but our bot is **async**. We bridge this with `asyncio.to_thread()`:
@@ -239,6 +244,7 @@ except Exception as e:
     await callback(f"Connection failed: {e}")
 ```
 
+\newpage
 ## Key Files
 
 | File | Purpose |
@@ -251,17 +257,18 @@ except Exception as e:
 
 ```
 maps/map_catacombs_01/
-├── graph                    # Navigation graph (protobuf)
-├── waypoint_snapshots/      # Visual data for each waypoint
-│   ├── snapshot_abc123
-│   ├── snapshot_def456
-│   └── ...
-└── edge_snapshots/          # Visual data for paths
-    ├── edge_snap_001
-    ├── edge_snap_002
-    └── ...
+|-- graph                    # Navigation graph (protobuf)
+|-- waypoint_snapshots/      # Visual data for each waypoint
+|   |-- snapshot_abc123
+|   |-- snapshot_def456
+|   +-- ...
++-- edge_snapshots/          # Visual data for paths
+    |-- edge_snap_001
+    |-- edge_snap_002
+    +-- ...
 ```
 
+\newpage
 ## Reliability Features
 
 ### Graceful Shutdown
@@ -269,19 +276,19 @@ maps/map_catacombs_01/
 When the bot stops (Ctrl+C or SIGTERM), it automatically releases the lease:
 
 ```
-Bot running → Ctrl+C pressed
-                    │
-                    ▼
+Bot running -> Ctrl+C pressed
+                    |
+                    v
             post_shutdown() called
-                    │
-                    ▼
+                    |
+                    v
             spot_controller.disconnect()
-                    │
-                    ▼
+                    |
+                    v
             Lease released cleanly
-                    │
-                    ▼
-            Next bot start → Can acquire lease!
+                    |
+                    v
+            Next bot start -> Can acquire lease!
 ```
 
 ### Force Connect
@@ -289,12 +296,12 @@ Bot running → Ctrl+C pressed
 If the lease is stuck (from a crashed bot), use `/forceconnect`:
 
 ```
-/forceconnect → Takes lease from ANY client
-                    │
-                    ▼
+/forceconnect -> Takes lease from ANY client
+                    |
+                    v
             Previous owner disconnected
-                    │
-                    ▼
+                    |
+                    v
             Bot now has control
 ```
 
@@ -307,6 +314,7 @@ Use `/status` to check:
 - E-stop status
 - Current lease owner
 
+\newpage
 ## Common Issues & Solutions
 
 | Issue | Cause | Solution |

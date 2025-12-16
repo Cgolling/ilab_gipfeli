@@ -7,13 +7,14 @@ This document explains how the Telegram bot component works at a conceptual leve
 The Telegram bot serves as the **user interface** for the Gipfeli delivery system. Students interact with SPOT through Telegram messages and button presses, never directly with the robot.
 
 ```
-┌─────────────┐      ┌─────────────┐      ┌─────────────┐
-│   Student   │ ──▶  │  Telegram   │ ──▶  │    SPOT     │
-│   (Phone)   │      │     Bot     │      │   Robot     │
-└─────────────┘      └─────────────┘      └─────────────┘
++-------------+      +-------------+      +-------------+
+|   Student   | -->  |  Telegram   | -->  |    SPOT     |
+|   (Phone)   |      |     Bot     |      |   Robot     |
++-------------+      +-------------+      +-------------+
      User              Interface           Hardware
 ```
 
+\newpage
 ## How Telegram Bots Work
 
 Telegram bots are programs that receive messages from users and respond. The key concepts:
@@ -29,23 +30,24 @@ When a user sends `/goto`:
 
 ```
 1. User taps "/goto" in Telegram
-         │
-         ▼
+         |
+         v
 2. Telegram servers receive the message
-         │
-         ▼
+         |
+         v
 3. Our bot (polling) fetches the update
-         │
-         ▼
+         |
+         v
 4. CommandHandler("goto", goto) matches it
-         │
-         ▼
+         |
+         v
 5. goto() function runs, sends button menu
-         │
-         ▼
+         |
+         v
 6. User sees location buttons in chat
 ```
 
+\newpage
 ## Handlers Explained
 
 ### Command Handlers
@@ -67,14 +69,15 @@ Responds to **inline button presses**:
 ```python
 # When user taps "Aula" button:
 callback_data = "goto_aula"
-           │
-           ▼
+           |
+           v
 CallbackQueryHandler(goto_callback, pattern="^goto_")
-           │
-           ▼
+           |
+           v
 goto_callback() extracts "aula" and navigates
 ```
 
+\newpage
 ## Async/Await Pattern
 
 All handlers are `async` functions. This is important because:
@@ -127,6 +130,7 @@ spot_controller: Optional[SpotController] = None
 
 **Trade-off**: Not ideal for testing (we use `patch` to mock it).
 
+\newpage
 ## Lifecycle Hooks
 
 The bot uses lifecycle hooks to manage SPOT connection automatically.
@@ -156,45 +160,47 @@ async def post_shutdown(application):
 **Why this matters**: Without graceful shutdown, the lease stays "claimed" and you can't reconnect without using `/forceconnect` or the tablet.
 
 ```
-Bot running → Ctrl+C pressed
-                    │
-                    ▼
+Bot running -> Ctrl+C pressed
+                    |
+                    v
             post_shutdown() called
-                    │
-                    ▼
+                    |
+                    v
             Lease released cleanly
-                    │
-                    ▼
-            Next start → Can acquire lease!
+                    |
+                    v
+            Next start -> Can acquire lease!
 ```
 
+\newpage
 ## Message Flow Diagram
 
 ```
 User Action          Bot Response              Robot Action
-───────────────────────────────────────────────────────────
-/start          →    "Hi [name]!"
-/help           →    Command list
-/connect        →    "Connecting..."      →    Authenticate
-                     "Authenticated"      ←    SDK connected
-                     "Lease acquired"     ←    Lease obtained
-                     "Map uploaded"       ←    Graph loaded
-                     "Localized!"         ←    Position found
+-----------------------------------------------------------
+/start          ->   "Hi [name]!"
+/help           ->   Command list
+/connect        ->   "Connecting..."      ->   Authenticate
+                     "Authenticated"      <-   SDK connected
+                     "Lease acquired"     <-   Lease obtained
+                     "Map uploaded"       <-   Graph loaded
+                     "Localized!"         <-   Position found
                      "SPOT ready!"
-/status         →    Connection, battery,
+/status         ->   Connection, battery,
                      motors, lease info
-/goto           →    [Button menu]
-[Tap "Aula"]    →    "Navigating..."      →    Start moving
-                     "Navigating (3s)"    ←    Heartbeat
-                     "Navigating (6s)"    ←    Heartbeat
-                     "Arrived at Aula!"   ←    Goal reached
-/disconnect     →    "Disconnecting..."   →    Release lease
+/goto           ->   [Button menu]
+[Tap "Aula"]    ->   "Navigating..."      ->   Start moving
+                     "Navigating (3s)"    <-   Heartbeat
+                     "Navigating (6s)"    <-   Heartbeat
+                     "Arrived at Aula!"   <-   Goal reached
+/disconnect     ->   "Disconnecting..."   ->   Release lease
                      "Disconnected"
-/forceconnect   →    "Force connecting..."→    Take lease
+/forceconnect   ->   "Force connecting..."->   Take lease
                      "Lease forcefully        from any client
                       acquired"
 ```
 
+\newpage
 ## Error Handling
 
 The bot handles errors gracefully:
