@@ -32,7 +32,8 @@ logger = logging.getLogger(__name__)
 
 # Configuration constants
 DEFAULT_SPOT_HOSTNAME = "192.168.80.3"
-DEFAULT_MAP_PATH = "maps/map_catacombs_01"
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+DEFAULT_MAP_PATH = os.path.join(PROJECT_ROOT, "maps/map_catacombs_01")
 CALLBACK_DATA_PREFIX = "goto_"
 
 # Global SPOT controller instance
