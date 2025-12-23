@@ -8,20 +8,20 @@ from typing import Awaitable, Callable, Optional
 
 from src.logging_config import setup_logging
 
-# Initialize logging (safe to call multiple times)
-setup_logging()
-
 import bosdyn.client
 import bosdyn.client.util
 from bosdyn.api import robot_state_pb2
 from bosdyn.api.graph_nav import graph_nav_pb2, map_pb2, nav_pb2
-from bosdyn.client.exceptions import ResponseError
+from bosdyn.client.exceptions import ProxyConnectionError, ResponseError, UnableToConnectToRobotError
 from bosdyn.client.frame_helpers import get_odom_tform_body
 from bosdyn.client.graph_nav import GraphNavClient
 from bosdyn.client.lease import LeaseClient, LeaseKeepAlive, ResourceAlreadyClaimedError
 from bosdyn.client.power import PowerClient, power_on_motors, safe_power_off_motors
 from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient
 from bosdyn.client.robot_state import RobotStateClient
+
+# Initialize logging (safe to call multiple times)
+setup_logging()
 
 logger = logging.getLogger(__name__)
 
@@ -360,7 +360,7 @@ class SpotController:
                 "3. Use /forceconnect to take over (use with caution!)"
             )
             return False
-        except ConnectionRefusedError:
+        except (ConnectionRefusedError, UnableToConnectToRobotError, ProxyConnectionError):
             logger.error(f"Connection refused to {self.hostname}")
             await status_callback(
                 f"Cannot reach SPOT at {self.hostname}\n\n"

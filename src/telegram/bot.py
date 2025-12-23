@@ -35,15 +35,12 @@ DEFAULT_SPOT_HOSTNAME = "192.168.80.3"
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 DEFAULT_MAP_PATH = os.path.join(PROJECT_ROOT, "maps/map_catacombs_01")
 CALLBACK_DATA_PREFIX = "goto_"
-
-# Global SPOT controller instance
-# Thread-safety note: python-telegram-bot uses a single-threaded async model,
-# so concurrent access to this variable is safe within Telegram handlers.
-# The SpotController itself wraps blocking SDK calls with asyncio.to_thread(),
-# which is also safe as those calls don't share mutable state.
-# Do NOT access this from external threads without proper synchronization.
-spot_controller: Optional[SpotController] = None
-
+WAYPOINTS = {
+    "aula": "Aula",
+    "triangle": "Triangle",
+    "hauswart": "Hauswart",
+    "turnhalle": "Turnhalle",
+}
 
 # Define a few command handlers. These usually take the two arguments update and
 # context.
@@ -79,80 +76,70 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
-async def connect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Connect to SPOT robot."""
-    global spot_controller
-    
+async def _handle_connection(update: Update, context: ContextTypes.DEFAULT_TYPE, force: bool) -> None:
+    """Helper to handle connection logic (connect or forceconnect)."""
     if not update.message:
         return
 
     hostname = os.getenv("SPOT_HOSTNAME", DEFAULT_SPOT_HOSTNAME)
     map_path = DEFAULT_MAP_PATH
+    action_desc = "forceconnect" if force else "connect"
 
-    logger.info(f"User initiated /connect to SPOT at {hostname}")
-    await update.message.reply_text("Starting SPOT connection procedure...")
+    logger.info(f"User initiated /{action_desc} to SPOT at {hostname}")
+    
+    if force:
+        await update.message.reply_text(
+            "FORCE CONNECT: Taking control from any other client...\n"
+            "(This will disconnect tablet or other scripts!)"
+        )
+    else:
+        await update.message.reply_text("Starting SPOT connection procedure...")
 
+    # Disconnect existing controller if any to ensure clean slate
+    current_controller = context.bot_data.get("spot_controller")
+    if current_controller and current_controller.is_connected:
+        try:
+            await current_controller.disconnect()
+        except Exception:
+            pass
+
+    # Create new controller
     spot_controller = SpotController(hostname, map_path)
+    context.bot_data["spot_controller"] = spot_controller
 
     async def send_status(msg: str):
         if not update.message:
             return
         await update.message.reply_text(msg)
 
-    success = await spot_controller.connect(send_status)
+    success = await spot_controller.connect(send_status, force_acquire=force)
 
     if success:
-        logger.info("SPOT connection successful via /connect command")
-        await update.message.reply_text("SPOT is ready! Use /goto to navigate.")
+        logger.info(f"SPOT {action_desc} successful")
+        msg = "SPOT is ready! Lease forcefully acquired." if force else "SPOT is ready! Use /goto to navigate."
+        await update.message.reply_text(msg)
     else:
-        logger.warning("SPOT connection failed via /connect command")
+        logger.warning(f"SPOT {action_desc} failed")
+        msg = "Force connection failed. Check logs." if force else "SPOT connection failed."
+        await update.message.reply_text(msg)
+
+
+async def connect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Connect to SPOT robot."""
+    await _handle_connection(update, context, force=False)
 
 
 async def forceconnect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Force connect to SPOT robot, taking the lease from any other client."""
-    global spot_controller
-    if not update.message:
-        return
-
-    hostname = os.getenv("SPOT_HOSTNAME", DEFAULT_SPOT_HOSTNAME)
-    map_path = DEFAULT_MAP_PATH
-
-    logger.warning(f"User initiated /forceconnect to SPOT at {hostname}")
-    await update.message.reply_text(
-        "FORCE CONNECT: Taking control from any other client...\n"
-        "(This will disconnect tablet or other scripts!)"
-    )
-
-    # Disconnect existing controller if any
-    if spot_controller and spot_controller.is_connected:
-        try:
-            await spot_controller.disconnect()
-        except Exception:
-            pass
-
-    spot_controller = SpotController(hostname, map_path)
-
-    async def send_status(msg: str):
-        if not update.message:
-            return
-        await update.message.reply_text(msg)
-
-    success = await spot_controller.connect(send_status, force_acquire=True)
-
-    if success:
-        logger.info("SPOT force-connection successful")
-        await update.message.reply_text("SPOT is ready! Lease forcefully acquired.")
-    else:
-        logger.warning("SPOT force-connection failed")
-        await update.message.reply_text("Force connection failed. Check logs.")
+    await _handle_connection(update, context, force=True)
 
 
 async def disconnect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Disconnect from SPOT and release the lease."""
-    global spot_controller
     if not update.message:
         return
 
+    spot_controller = context.bot_data.get("spot_controller")
     if spot_controller is None:
         await update.message.reply_text("Not connected to SPOT.")
         return
@@ -177,6 +164,7 @@ async def status_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not update.message:
         return
     
+    spot_controller = context.bot_data.get("spot_controller")
     if spot_controller is None:
         await update.message.reply_text(
             "SPOT Status: Not initialized\n\n"
@@ -226,16 +214,17 @@ async def goto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send inline keyboard with location options."""
     if not update.message:
         return
-    keyboard = [
-        [
-            InlineKeyboardButton("Aula", callback_data=f"{CALLBACK_DATA_PREFIX}aula"),
-            InlineKeyboardButton("Triangle", callback_data=f"{CALLBACK_DATA_PREFIX}triangle"),
-        ],
-        [
-            InlineKeyboardButton("Hauswart", callback_data=f"{CALLBACK_DATA_PREFIX}hauswart"),
-            InlineKeyboardButton("Turnhalle", callback_data=f"{CALLBACK_DATA_PREFIX}turnhalle"),
-        ],
-    ]
+    
+    keyboard = []
+    row = []
+    for key, name in WAYPOINTS.items():
+        row.append(InlineKeyboardButton(name, callback_data=f"{CALLBACK_DATA_PREFIX}{key}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+        
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Where do you want to go?", reply_markup=reply_markup)
 
@@ -252,7 +241,9 @@ async def goto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     location = query.data.replace(CALLBACK_DATA_PREFIX, "")
+    location_name = WAYPOINTS.get(location, location.title())
 
+    spot_controller = context.bot_data.get("spot_controller")
     # Check if SPOT is connected
     if spot_controller is None or not spot_controller.is_connected:
         await query.edit_message_text("SPOT not connected. Use /connect first.")
@@ -269,22 +260,15 @@ async def goto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             # Unexpected error - log for debugging
             logger.warning(f"Unexpected error updating status message: {e}")
 
-    logger.info(f"User requested navigation to: {location}")
+    logger.info(f"User requested navigation to: {location} ({location_name})")
     success = await spot_controller.navigate_to(location, send_status)
 
     if success:
-        logger.info(f"Navigation to {location} completed successfully")
-        await query.edit_message_text(f"Arrived at {location.title()}!")
+        logger.info(f"Navigation to {location_name} completed successfully")
+        await query.edit_message_text(f"Arrived at {location_name}!")
     else:
-        logger.warning(f"Navigation to {location} failed")
-        await query.edit_message_text(f"Failed to navigate to {location.title()}")
-
-
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Echo the user message."""
-    if not (update.message and update.message.text):
-        return
-    await update.message.reply_text(update.message.text)
+        logger.warning(f"Navigation to {location_name} failed")
+        await query.edit_message_text(f"Failed to navigate to {location_name}")
 
 
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -303,13 +287,12 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def post_init(application: Application) -> None:
     """Try to connect to SPOT once on startup."""
-    global spot_controller
-
     hostname = os.getenv("SPOT_HOSTNAME", DEFAULT_SPOT_HOSTNAME)
     map_path = DEFAULT_MAP_PATH
 
     logger.info(f"Attempting auto-connect to SPOT at {hostname}...")
     spot_controller = SpotController(hostname, map_path)
+    application.bot_data["spot_controller"] = spot_controller
 
     async def log_status(msg: str):
         logger.info(f"SPOT: {msg}")
@@ -331,7 +314,7 @@ async def post_shutdown(application: Application) -> None:
     This is called when the bot receives SIGINT (Ctrl+C) or SIGTERM,
     ensuring the lease is properly released so reconnection is possible.
     """
-    global spot_controller
+    spot_controller = application.bot_data.get("spot_controller")
 
     logger.info("Bot shutting down - releasing SPOT resources...")
 
@@ -345,7 +328,7 @@ async def post_shutdown(application: Application) -> None:
         except Exception as e:
             logger.error(f"Error disconnecting SPOT during shutdown: {e}")
         finally:
-            spot_controller = None
+            application.bot_data["spot_controller"] = None
 
     logger.info("Shutdown complete")
 
@@ -387,9 +370,6 @@ def main() -> None:
     # General commands
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-
-    # on non command i.e message - echo the message on Telegram
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
     # handle unknown commands
     application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
