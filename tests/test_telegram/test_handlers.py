@@ -19,7 +19,11 @@ from src.telegram.bot import (
     help_command,
     goto,
     goto_callback,
+    sound,
+    sound_callback,
+    volume,
     CALLBACK_DATA_PREFIX,
+    SOUND_CALLBACK_DATA_PREFIX,
 )
 
 
@@ -66,6 +70,8 @@ class TestHelpCommand:
         assert "/help" in help_text
         assert "/connect" in help_text
         assert "/goto" in help_text
+        assert "/sound" in help_text
+        assert "/volume" in help_text
 
     @pytest.mark.asyncio
     async def test_help_mentions_spot_robot(
@@ -242,3 +248,159 @@ class TestGotoCallback:
 
         final_msg = mock_callback_query.edit_message_text.call_args[0][0]
         assert "Failed" in final_msg or "failed" in final_msg.lower()
+
+
+class TestSoundCommand:
+    """Tests for /sound command."""
+
+    @pytest.mark.asyncio
+    async def test_sound_no_files_shows_hint(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        """Command shows guidance when no WAV files exist."""
+        mock_telegram_context.args = []
+        with patch("src.telegram.bot.get_available_sounds", return_value={}):
+            await sound(mock_telegram_update, mock_telegram_context)
+
+        reply = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "No WAV files found" in reply
+
+    @pytest.mark.asyncio
+    async def test_sound_with_arg_plays_selected_file(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        """Known sound name triggers SpotController.play_wav_file."""
+        mock_telegram_context.args = ["beep"]
+        mock_controller = MagicMock()
+        mock_controller.play_wav_file = AsyncMock(return_value=True)
+
+        with patch(
+            "src.telegram.bot.get_available_sounds",
+            return_value={"beep": "sounds/beep.wav"}
+        ), patch("src.telegram.bot.spot_controller", mock_controller):
+            await sound(mock_telegram_update, mock_telegram_context)
+
+        mock_controller.play_wav_file.assert_called_once()
+        assert mock_controller.play_wav_file.call_args.kwargs["gain"] is None
+
+    @pytest.mark.asyncio
+    async def test_sound_with_gain_passes_gain_to_controller(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        """Optional gain argument should be parsed and forwarded."""
+        mock_telegram_context.args = ["beep", "0.75"]
+        mock_controller = MagicMock()
+        mock_controller.play_wav_file = AsyncMock(return_value=True)
+
+        with patch(
+            "src.telegram.bot.get_available_sounds",
+            return_value={"beep": "sounds/beep.wav"}
+        ), patch("src.telegram.bot.spot_controller", mock_controller):
+            await sound(mock_telegram_update, mock_telegram_context)
+
+        assert mock_controller.play_wav_file.call_args.kwargs["gain"] == pytest.approx(0.75)
+
+    @pytest.mark.asyncio
+    async def test_sound_invalid_gain_shows_error(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        """Invalid gain should be rejected before controller call."""
+        mock_telegram_context.args = ["beep", "abc"]
+        mock_controller = MagicMock()
+        mock_controller.play_wav_file = AsyncMock(return_value=True)
+
+        with patch(
+            "src.telegram.bot.get_available_sounds",
+            return_value={"beep": "sounds/beep.wav"}
+        ), patch("src.telegram.bot.spot_controller", mock_controller):
+            await sound(mock_telegram_update, mock_telegram_context)
+
+        mock_controller.play_wav_file.assert_not_called()
+        reply = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "Gain must be a number" in reply
+
+    @pytest.mark.asyncio
+    async def test_sound_callback_not_connected_shows_error(
+        self, mock_callback_query, mock_telegram_context
+    ):
+        """Sound callback should fail gracefully when SPOT is disconnected."""
+        update = MagicMock()
+        mock_callback_query.data = f"{SOUND_CALLBACK_DATA_PREFIX}beep"
+        update.callback_query = mock_callback_query
+
+        mock_controller = MagicMock()
+        mock_controller.is_connected = False
+
+        with patch(
+            "src.telegram.bot.get_available_sounds",
+            return_value={"beep": "sounds/beep.wav"}
+        ), patch("src.telegram.bot.spot_controller", mock_controller):
+            await sound_callback(update, mock_telegram_context)
+
+        msg = mock_callback_query.edit_message_text.call_args[0][0]
+        assert "not connected" in msg.lower()
+
+
+class TestVolumeCommand:
+    """Tests for /volume command."""
+
+    @pytest.mark.asyncio
+    async def test_volume_not_connected_shows_error(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        """Volume command should require active connection."""
+        mock_telegram_context.args = []
+        with patch("src.telegram.bot.spot_controller", None):
+            await volume(mock_telegram_update, mock_telegram_context)
+
+        reply = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "not connected" in reply.lower()
+
+    @pytest.mark.asyncio
+    async def test_volume_get_current_value(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        """Without args, command should return current volume."""
+        mock_telegram_context.args = []
+        mock_controller = MagicMock()
+        mock_controller.is_connected = True
+        mock_controller.get_audio_volume_percent = AsyncMock(return_value=42.5)
+
+        with patch("src.telegram.bot.spot_controller", mock_controller):
+            await volume(mock_telegram_update, mock_telegram_context)
+
+        reply = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "42.5%" in reply
+
+    @pytest.mark.asyncio
+    async def test_volume_set_value(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        """With one argument, command should set volume."""
+        mock_telegram_context.args = ["65"]
+        mock_controller = MagicMock()
+        mock_controller.is_connected = True
+        mock_controller.set_audio_volume_percent = AsyncMock(return_value=True)
+        mock_controller.get_audio_volume_percent = AsyncMock(return_value=65.0)
+
+        with patch("src.telegram.bot.spot_controller", mock_controller):
+            await volume(mock_telegram_update, mock_telegram_context)
+
+        mock_controller.set_audio_volume_percent.assert_called_once_with(65.0)
+        reply = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "65.0%" in reply
+
+    @pytest.mark.asyncio
+    async def test_volume_invalid_input_rejected(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        """Non-numeric values should be rejected."""
+        mock_telegram_context.args = ["loud"]
+        mock_controller = MagicMock()
+        mock_controller.is_connected = True
+
+        with patch("src.telegram.bot.spot_controller", mock_controller):
+            await volume(mock_telegram_update, mock_telegram_context)
+
+        reply = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "must be a number" in reply.lower()

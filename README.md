@@ -274,12 +274,19 @@ ilab_gipfeli/
 | `/forceconnect` | Lease erzwingen (falls blockiert) |
 | `/status` | Roboter-Status anzeigen (Batterie, etc.) |
 | `/goto` | SPOT zu einem Standort navigieren |
+| `/sound` | WAV-Datei über Spot CAM abspielen |
+| `/volume` | Spot CAM Lautstärke lesen/setzen (0-100) |
 
 **Verfügbare Standorte für `/goto`:**
 - Aula
 - Triangle
 - Hauswart
 - Turnhalle
+
+**Audio mit `/sound`:**
+- Lege `.wav` Dateien in den Ordner `sounds/`
+- Starte z.B. mit `/sound` (Button-Auswahl), `/sound beep` oder `/sound beep 0.8`
+- Lautstärke mit `/volume` anzeigen oder mit `/volume 60` setzen
 
 ---
 

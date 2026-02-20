@@ -15,6 +15,7 @@ import bosdyn.client
 import bosdyn.client.util
 from bosdyn.api import robot_state_pb2
 from bosdyn.api.graph_nav import graph_nav_pb2, map_pb2, nav_pb2
+from bosdyn.api.spot_cam import audio_pb2
 from bosdyn.client.exceptions import ResponseError
 from bosdyn.client.frame_helpers import get_odom_tform_body
 from bosdyn.client.graph_nav import GraphNavClient
@@ -22,6 +23,7 @@ from bosdyn.client.lease import LeaseClient, LeaseKeepAlive, ResourceAlreadyClai
 from bosdyn.client.power import PowerClient, power_on_motors, safe_power_off_motors
 from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient
 from bosdyn.client.robot_state import RobotStateClient
+from bosdyn.client.spot_cam.audio import AudioClient
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +223,7 @@ class SpotController:
         self.robot_command_client = None
         self.robot_state_client = None
         self.power_client = None
+        self.audio_client = None
 
         # Graph state
         self._current_graph = None
@@ -265,6 +268,7 @@ class SpotController:
             "battery_percent": None,
             "lease_owner": None,
             "estop_status": None,
+            "audio_available": self.audio_client is not None,
         }
 
         if not self.robot:
@@ -325,6 +329,10 @@ class SpotController:
             await status_callback("Connecting to SPOT...")
             await asyncio.to_thread(self._create_sdk_and_authenticate)
             await status_callback("Authenticated with SPOT")
+            if self.audio_client:
+                await status_callback("Spot CAM audio service available")
+            else:
+                await status_callback("Spot CAM audio service not available")
 
             # Step 2: Acquire lease
             if force_acquire:
@@ -406,12 +414,23 @@ class SpotController:
             GraphNavClient.default_service_name)
         self.power_client = self.robot.ensure_client(
             PowerClient.default_service_name)
+        self._initialize_optional_audio_client()
 
         # Check initial power state
         power_state = self.robot_state_client.get_robot_state().power_state
         self._started_powered_on = (power_state.motor_power_state == power_state.STATE_ON)
         self._powered_on = self._started_powered_on
         logger.info(f"Initial power state: motors_on={self._started_powered_on}")
+
+    def _initialize_optional_audio_client(self) -> None:
+        """Initialize Spot CAM audio client if available on this robot."""
+        try:
+            assert self.robot is not None
+            self.audio_client = self.robot.ensure_client(AudioClient.default_service_name)
+            logger.info("Spot CAM audio service available")
+        except Exception as e:
+            self.audio_client = None
+            logger.info(f"Spot CAM audio service unavailable: {e}")
 
     def _acquire_lease(self) -> None:
         """
@@ -705,6 +724,118 @@ class SpotController:
             return True, "Robot is impaired"
         else:
             return False, None  # Still navigating
+
+    async def play_wav_file(
+        self,
+        sound_name: str,
+        wav_path: str,
+        status_callback: Callable[[str], Awaitable[None]],
+        gain: Optional[float] = None,
+    ) -> bool:
+        """
+        Upload a local WAV file to Spot CAM and play it immediately.
+
+        Args:
+            sound_name: Name used to store the uploaded sound on the robot.
+            wav_path: Local path to a .wav file.
+            status_callback: Async callback for user-facing status messages.
+            gain: Optional playback gain multiplier.
+
+        Returns:
+            True on success, False on failure.
+        """
+        if not self.is_connected:
+            await status_callback("Not connected to SPOT")
+            return False
+
+        if self.audio_client is None:
+            await status_callback("Spot CAM audio service is not available on this robot.")
+            return False
+
+        if not os.path.isfile(wav_path):
+            await status_callback(f"WAV file not found: {wav_path}")
+            return False
+
+        if not wav_path.lower().endswith(".wav"):
+            await status_callback("Only .wav files are supported.")
+            return False
+
+        try:
+            await status_callback(f"Uploading sound '{sound_name}'...")
+            sound_data = await asyncio.to_thread(self._read_sound_file, wav_path)
+            await asyncio.to_thread(self._upload_and_play_sound, sound_name, sound_data, gain)
+            await status_callback(f"Playing '{sound_name}'")
+            return True
+        except Exception as e:
+            logger.exception(f"Failed to play WAV file '{wav_path}': {e}")
+            await status_callback(f"Failed to play sound: {e}")
+            return False
+
+    def _read_sound_file(self, wav_path: str) -> bytes:
+        """Read WAV file bytes from disk."""
+        with open(wav_path, "rb") as fh:
+            return fh.read()
+
+    def _upload_and_play_sound(
+        self,
+        sound_name: str,
+        sound_data: bytes,
+        gain: Optional[float],
+    ) -> None:
+        """Upload sound bytes to Spot CAM and start playback."""
+        assert self.audio_client is not None
+        sound = audio_pb2.Sound(name=sound_name)
+
+        # Replace existing sound with same name for predictable behavior.
+        try:
+            self.audio_client.delete_sound(sound)
+        except Exception:
+            pass
+
+        self.audio_client.load_sound(sound, sound_data)
+        if gain is not None:
+            self.audio_client.play_sound(sound, gain=max(gain, 0.0))
+        else:
+            self.audio_client.play_sound(sound)
+
+    async def get_audio_volume_percent(self) -> Optional[float]:
+        """
+        Read Spot CAM audio volume percentage (0..100).
+
+        Returns:
+            Current volume percentage, or None if unavailable.
+        """
+        if not self.is_connected or self.audio_client is None:
+            return None
+
+        try:
+            volume = await asyncio.to_thread(self.audio_client.get_volume)
+            return float(volume)
+        except Exception as e:
+            logger.exception(f"Failed to get audio volume: {e}")
+            return None
+
+    async def set_audio_volume_percent(self, percentage: float) -> bool:
+        """
+        Set Spot CAM audio volume percentage (0..100).
+
+        Args:
+            percentage: Target volume in percent.
+
+        Returns:
+            True if applied, False if unavailable or failed.
+        """
+        if not self.is_connected or self.audio_client is None:
+            return False
+
+        target = min(max(percentage, 0.0), 100.0)
+
+        try:
+            await asyncio.to_thread(self.audio_client.set_volume, target)
+            return True
+        except Exception as e:
+            logger.exception(f"Failed to set audio volume to {target}: {e}")
+            return False
 
     async def disconnect(self):
         """Disconnect from SPOT and cleanup."""

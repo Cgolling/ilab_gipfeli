@@ -35,6 +35,8 @@ DEFAULT_SPOT_HOSTNAME = "192.168.80.3"
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 DEFAULT_MAP_PATH = os.path.join(PROJECT_ROOT, "maps/map_catacombs_01")
 CALLBACK_DATA_PREFIX = "goto_"
+SOUND_CALLBACK_DATA_PREFIX = "sound_"
+SOUNDS_DIR = os.path.join(PROJECT_ROOT, "sounds")
 
 # Global SPOT controller instance
 # Thread-safety note: python-telegram-bot uses a single-threaded async model,
@@ -73,10 +75,58 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/status - Show robot status\n\n"
         "Navigation:\n"
         "/goto - Navigate to a location\n\n"
+        "Audio:\n"
+        "/sound - Play a WAV sound from sounds/ (optional gain)\n\n"
+        "/volume - Get/set Spot CAM volume (0-100)\n\n"
         "Other:\n"
         "/start - Start the bot\n"
         "/help - Show this help message"
     )
+
+
+def get_available_sounds() -> dict[str, str]:
+    """
+    Discover available WAV files in SOUNDS_DIR.
+
+    Returns:
+        Mapping of sound name (filename without extension, lower-case)
+        to full file path.
+    """
+    if not os.path.isdir(SOUNDS_DIR):
+        return {}
+
+    sounds: dict[str, str] = {}
+    for file_name in sorted(os.listdir(SOUNDS_DIR)):
+        full_path = os.path.join(SOUNDS_DIR, file_name)
+        if not os.path.isfile(full_path):
+            continue
+        stem, ext = os.path.splitext(file_name)
+        if ext.lower() != ".wav" or not stem:
+            continue
+        sounds[stem.lower()] = full_path
+    return sounds
+
+
+def _build_sound_keyboard(sound_names: list[str]) -> InlineKeyboardMarkup:
+    """Build a 2-column inline keyboard for sound selection."""
+    keyboard: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+
+    for index, name in enumerate(sound_names, start=1):
+        row.append(
+            InlineKeyboardButton(
+                name,
+                callback_data=f"{SOUND_CALLBACK_DATA_PREFIX}{name}",
+            )
+        )
+        if index % 2 == 0:
+            keyboard.append(row)
+            row = []
+
+    if row:
+        keyboard.append(row)
+
+    return InlineKeyboardMarkup(keyboard)
 
 
 async def connect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -215,6 +265,13 @@ async def status_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if status["lease_owner"]:
             lines.append(f"Lease Owner: {status['lease_owner']}")
 
+        # Spot CAM audio
+        lines.append(
+            "Spot CAM Audio: Available"
+            if status.get("audio_available", False)
+            else "Spot CAM Audio: Not available"
+        )
+
         await update.message.reply_text("\n".join(lines))
 
     except Exception as e:
@@ -280,6 +337,179 @@ async def goto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.edit_message_text(f"Failed to navigate to {location.title()}")
 
 
+async def sound(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Play a sound from local WAV files via Spot CAM audio service."""
+    if not update.message:
+        return
+
+    sounds = get_available_sounds()
+    if not sounds:
+        await update.message.reply_text(
+            "No WAV files found.\n"
+            "Add .wav files to the 'sounds/' folder first."
+        )
+        return
+
+    raw_args = getattr(context, "args", [])
+    args = raw_args if isinstance(raw_args, list) else []
+
+    # Direct play mode: /sound <name> [gain]
+    if args:
+        if len(args) > 2:
+            await update.message.reply_text("Usage: /sound <name> [gain]")
+            return
+
+        sound_name = args[0].strip().lower()
+        if sound_name.endswith(".wav"):
+            sound_name = sound_name[:-4]
+
+        gain: Optional[float] = None
+        if len(args) == 2:
+            try:
+                gain = float(args[1])
+            except ValueError:
+                await update.message.reply_text("Gain must be a number, e.g. /sound beep 0.8")
+                return
+            if gain < 0.0:
+                await update.message.reply_text("Gain must be >= 0.0")
+                return
+
+        if sound_name not in sounds:
+            available = ", ".join(sorted(sounds.keys()))
+            await update.message.reply_text(
+                f"Unknown sound '{sound_name}'. Available: {available}"
+            )
+            return
+
+        if spot_controller is None:
+            await update.message.reply_text("SPOT not connected. Use /connect first.")
+            return
+
+        async def send_status(msg: str):
+            if not update.message:
+                return
+            await update.message.reply_text(msg)
+
+        success = await spot_controller.play_wav_file(
+            sound_name=sound_name,
+            wav_path=sounds[sound_name],
+            status_callback=send_status,
+            gain=gain,
+        )
+        if success:
+            if gain is None:
+                await update.message.reply_text(f"Sound '{sound_name}' playback started.")
+            else:
+                await update.message.reply_text(
+                    f"Sound '{sound_name}' playback started with gain {gain:.2f}."
+                )
+        return
+
+    # Selection mode: /sound -> inline buttons
+    reply_markup = _build_sound_keyboard(sorted(sounds.keys()))
+    await update.message.reply_text("Choose a sound:", reply_markup=reply_markup)
+
+
+async def sound_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle sound button presses and play selected WAV file."""
+    if not update.callback_query:
+        return
+
+    query = update.callback_query
+    await query.answer()
+
+    if not query.data:
+        return
+
+    sound_name = query.data
+    if sound_name.startswith(SOUND_CALLBACK_DATA_PREFIX):
+        sound_name = sound_name[len(SOUND_CALLBACK_DATA_PREFIX):]
+
+    sounds = get_available_sounds()
+    if sound_name not in sounds:
+        await query.edit_message_text(
+            f"Sound '{sound_name}' not found in sounds/ folder anymore."
+        )
+        return
+
+    if spot_controller is None or not spot_controller.is_connected:
+        await query.edit_message_text("SPOT not connected. Use /connect first.")
+        return
+
+    async def send_status(msg: str):
+        try:
+            await query.edit_message_text(msg)
+        except BadRequest as e:
+            logger.debug(f"Could not update status message: {e}")
+        except Exception as e:
+            logger.warning(f"Unexpected error updating status message: {e}")
+
+    success = await spot_controller.play_wav_file(
+        sound_name=sound_name,
+        wav_path=sounds[sound_name],
+        status_callback=send_status,
+    )
+
+    if success:
+        await query.edit_message_text(f"Playing '{sound_name}'")
+    else:
+        await query.edit_message_text(f"Failed to play '{sound_name}'")
+
+
+async def volume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Get or set Spot CAM audio volume.
+
+    Usage:
+    - /volume
+    - /volume <0..100>
+    """
+    if not update.message:
+        return
+
+    if spot_controller is None or not spot_controller.is_connected:
+        await update.message.reply_text("SPOT not connected. Use /connect first.")
+        return
+
+    raw_args = getattr(context, "args", [])
+    args = raw_args if isinstance(raw_args, list) else []
+
+    if len(args) > 1:
+        await update.message.reply_text("Usage: /volume [0-100]")
+        return
+
+    # Read current volume
+    if not args:
+        current = await spot_controller.get_audio_volume_percent()
+        if current is None:
+            await update.message.reply_text("Spot CAM audio service is not available.")
+            return
+        await update.message.reply_text(f"Spot CAM volume: {current:.1f}%")
+        return
+
+    # Set volume
+    try:
+        target = float(args[0])
+    except ValueError:
+        await update.message.reply_text("Volume must be a number between 0 and 100.")
+        return
+
+    if target < 0.0 or target > 100.0:
+        await update.message.reply_text("Volume must be between 0 and 100.")
+        return
+
+    success = await spot_controller.set_audio_volume_percent(target)
+    if not success:
+        await update.message.reply_text("Could not set volume (Spot CAM audio unavailable).")
+        return
+
+    current = await spot_controller.get_audio_volume_percent()
+    if current is None:
+        await update.message.reply_text(f"Spot CAM volume set to {target:.1f}%.")
+    else:
+        await update.message.reply_text(f"Spot CAM volume set to {current:.1f}%.")
+
+
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Echo the user message."""
     if not (update.message and update.message.text):
@@ -297,7 +527,9 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "/start - Start the bot\n"
         "/help - Get help\n"
         "/connect - Connect to SPOT robot\n"
-        "/goto - Go to a location"
+        "/goto - Go to a location\n"
+        "/sound - Play a sound\n"
+        "/volume - Get/set volume"
     )
 
 
@@ -383,6 +615,11 @@ def main() -> None:
     # Navigation commands
     application.add_handler(CommandHandler("goto", goto))
     application.add_handler(CallbackQueryHandler(goto_callback, pattern=f"^{CALLBACK_DATA_PREFIX}"))
+    application.add_handler(CommandHandler("sound", sound))
+    application.add_handler(CommandHandler("volume", volume))
+    application.add_handler(
+        CallbackQueryHandler(sound_callback, pattern=f"^{SOUND_CALLBACK_DATA_PREFIX}")
+    )
 
     # General commands
     application.add_handler(CommandHandler("start", start))
