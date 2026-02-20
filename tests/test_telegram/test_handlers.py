@@ -22,6 +22,7 @@ from src.telegram.bot import (
     sound,
     sound_callback,
     volume,
+    env_var_is_true,
     CALLBACK_DATA_PREFIX,
     SOUND_CALLBACK_DATA_PREFIX,
 )
@@ -82,6 +83,20 @@ class TestHelpCommand:
 
         help_text = mock_telegram_update.message.reply_text.call_args[0][0]
         assert "SPOT" in help_text
+
+
+class TestEnvHelpers:
+    """Tests for environment parsing helper."""
+
+    def test_env_var_is_true_default_true_when_missing(self, monkeypatch):
+        """Missing env var should return default value."""
+        monkeypatch.delenv("SPOT_AUTO_CONNECT", raising=False)
+        assert env_var_is_true("SPOT_AUTO_CONNECT", default=True) is True
+
+    def test_env_var_is_true_parses_false_values(self, monkeypatch):
+        """False-like strings should parse to False."""
+        monkeypatch.setenv("SPOT_AUTO_CONNECT", "false")
+        assert env_var_is_true("SPOT_AUTO_CONNECT", default=True) is False
 
 
 class TestGotoCommand:

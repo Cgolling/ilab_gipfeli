@@ -196,6 +196,9 @@ SPOT_HOSTNAME=192.168.80.3
 
 # Telegram Bot Token (siehe nächster Abschnitt)
 TELEGRAM_BOT_TOKEN=dein_telegram_token
+
+# Optional: Auto-Connect beim Bot-Start (true/false)
+SPOT_AUTO_CONNECT=true
 ```
 
 ### Telegram Bot erstellen
@@ -223,6 +226,13 @@ Wenn alles eingerichtet ist:
 
 ```bash
 uv run python -m src.telegram.bot
+```
+
+Nur Telegram ohne SPOT-Auto-Connect:
+
+```bash
+# In .env setzen:
+SPOT_AUTO_CONNECT=false
 ```
 
 Du solltest sehen:

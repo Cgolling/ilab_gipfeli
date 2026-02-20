@@ -37,6 +37,7 @@ DEFAULT_MAP_PATH = os.path.join(PROJECT_ROOT, "maps/map_catacombs_01")
 CALLBACK_DATA_PREFIX = "goto_"
 SOUND_CALLBACK_DATA_PREFIX = "sound_"
 SOUNDS_DIR = os.path.join(PROJECT_ROOT, "sounds")
+SPOT_AUTO_CONNECT_ENV = "SPOT_AUTO_CONNECT"
 
 # Global SPOT controller instance
 # Thread-safety note: python-telegram-bot uses a single-threaded async model,
@@ -45,6 +46,19 @@ SOUNDS_DIR = os.path.join(PROJECT_ROOT, "sounds")
 # which is also safe as those calls don't share mutable state.
 # Do NOT access this from external threads without proper synchronization.
 spot_controller: Optional[SpotController] = None
+
+
+def env_var_is_true(name: str, default: bool = True) -> bool:
+    """Parse common truthy/falsey env var values."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 # Define a few command handlers. These usually take the two arguments update and
@@ -536,6 +550,13 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def post_init(application: Application) -> None:
     """Try to connect to SPOT once on startup."""
     global spot_controller
+
+    if not env_var_is_true(SPOT_AUTO_CONNECT_ENV, default=True):
+        logger.info(
+            "SPOT auto-connect disabled via %s=false. Telegram bot running in Telegram-only mode.",
+            SPOT_AUTO_CONNECT_ENV,
+        )
+        return
 
     hostname = os.getenv("SPOT_HOSTNAME", DEFAULT_SPOT_HOSTNAME)
     map_path = DEFAULT_MAP_PATH
