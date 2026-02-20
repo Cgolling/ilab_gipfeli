@@ -88,6 +88,7 @@ class TestCommandMapping:
     def test_required_roles(self):
         assert required_role_for_command("status") == "viewer"
         assert required_role_for_command("id") == "viewer"
+        assert required_role_for_command("task") == "viewer"
         assert required_role_for_command("goto") == "operator"
         assert required_role_for_command("forceconnect") == "admin"
 

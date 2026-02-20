@@ -292,6 +292,7 @@ ilab_gipfeli/
 | `/goto` | SPOT zu einem Standort navigieren |
 | `/sound` | WAV-Datei über Spot CAM abspielen |
 | `/volume` | Spot CAM Lautstärke lesen/setzen (0-100) |
+| `/task` | Missions-/Task-Steuerung (z.B. Gipfeli-Lieferung) |
 
 **Verfügbare Standorte für `/goto`:**
 - Aula
@@ -304,13 +305,43 @@ ilab_gipfeli/
 - Starte z.B. mit `/sound` (Button-Auswahl), `/sound beep` oder `/sound beep 0.8`
 - Lautstärke mit `/volume` anzeigen oder mit `/volume 60` setzen
 
+**Tasks mit `/task`:**
+- `/task status` ist der **globale** Task-Status (später für mehrere Task-Typen/Queues)
+- `/task gipfeli` zeigt die gipfeli-spezifische Hilfe inkl. möglicher Ziele
+- Starten: `/task gipfeli <ziel>`
+- `/task gipfeli status` zeigt den Status des Gipfeli-Tasks
+- Aktiven Task abbrechen: `/task cancel` oder `/task gipfeli cancel`
+
+Beispiel:
+```text
+/task gipfeli zimmer_301
+```
+
+Der `gipfeli`-Task macht aktuell:
+1. Precheck (u.a. Verbindung + Mindestakku)
+2. Fahrt zum fixen Pickup-Waypoint
+3. Meldung "Gipfeli abgeholt"
+4. Fahrt zum Ziel-Waypoint
+5. Meldung "Gipfeli erfolgreich geliefert"
+
+Wichtige Konfiguration:
+- Pickup-Waypoint: `src/tasks/config.py` -> `GIPFELI_PICKUP_WAYPOINT`
+- Mindestakku: `src/tasks/config.py` -> `MIN_BATTERY_PERCENT`
+
+Aktueller MVP-Wert:
+- `GIPFELI_PICKUP_WAYPOINT = "hauswart"` (weil die Mensa aktuell noch nicht auf der Map ist)
+
+Hinweis:
+- Es kann nur **ein** Task gleichzeitig laufen.
+- Task-Status ist MVP-mäßig nur im RAM (nach Bot-Neustart weg).
+
 ---
 
 ## Zugriffskontrolle
 
 Der Bot nutzt rollenbasierte Zugriffskontrolle (RBAC) mit den Rollen:
-- `viewer`: `/start`, `/id`, `/help`, `/status`
-- `operator`: zusätzlich `/connect`, `/disconnect`, `/goto`, `/sound`, `/volume`
+- `viewer`: `/start`, `/id`, `/help`, `/status`, `/task status`
+- `operator`: zusätzlich `/connect`, `/disconnect`, `/goto`, `/sound`, `/volume`, `/task gipfeli ...`, `/task cancel`
 - `admin`: zusätzlich `/forceconnect`
 
 Konfiguration in `config/telegram_rbac.yml`.

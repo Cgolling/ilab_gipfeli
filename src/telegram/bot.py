@@ -23,7 +23,14 @@ from telegram.error import BadRequest, NetworkError
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
 from src.spot import SpotController
+from src.spot.spot_controller import WAYPOINTS
 from src.logging_config import setup_logging
+from src.tasks import (
+    GIPFELI_PICKUP_WAYPOINT,
+    MIN_BATTERY_PERCENT,
+    TaskManager,
+    TaskState,
+)
 from src.telegram.security import (
     CRITICAL_COMMANDS,
     RbacConfig,
@@ -61,6 +68,11 @@ DEFAULT_RBAC_CONFIG_PATH = os.path.join(PROJECT_ROOT, "config", "telegram_rbac.y
 spot_controller: Optional[SpotController] = None
 rbac_config: Optional[RbacConfig] = None
 rbac_enabled: bool = False
+task_manager = TaskManager(
+    lambda: spot_controller,
+    pickup_waypoint=GIPFELI_PICKUP_WAYPOINT,
+    min_battery_percent=MIN_BATTERY_PERCENT,
+)
 
 
 def env_var_is_true(name: str, default: bool = True) -> bool:
@@ -191,6 +203,81 @@ async def authorize(update: Update, command_name: str) -> bool:
     return True
 
 
+async def authorize_operator(update: Update) -> bool:
+    """Require operator role for task actions that mutate robot behavior."""
+    if not rbac_enabled:
+        return True
+
+    if rbac_config is None:
+        await _reply_access_denied(update, "Access control is not configured.")
+        logger.error("RBAC enabled but config not initialized.")
+        return False
+
+    user = update.effective_user
+    if user is None:
+        await _reply_access_denied(update, format_deny_message("operator"))
+        return False
+
+    actual_role = resolve_user_role(user.id, rbac_config)
+    if not is_allowed(actual_role, "operator"):
+        await _reply_access_denied(update, format_deny_message("operator"))
+        logger.warning(
+            "RBAC denied task action: user_id=%s username=%s actual=%s required=operator",
+            user.id,
+            user.username,
+            actual_role,
+        )
+        return False
+
+    return True
+
+
+def format_task_status_message(status) -> str:
+    """Build a compact status message for /task status."""
+    if status.state == TaskState.IDLE:
+        return "No task has been started yet."
+
+    lines = [
+        f"Task: {status.task_name or '-'}",
+        f"State: {status.state.value}",
+        f"Step: {status.step.value if status.step else '-'}",
+        f"Progress: {status.progress_current}/{status.progress_total}",
+    ]
+    if status.started_at:
+        lines.append(f"Started: {status.started_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    lines.append(f"Updated: {status.updated_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    if status.error:
+        lines.append(f"Last error: {status.error}")
+    return "\n".join(lines)
+
+
+def get_gipfeli_destinations() -> list[str]:
+    """Return destinations accepted by the gipfeli task."""
+    return sorted(WAYPOINTS.keys())
+
+
+def gipfeli_usage() -> str:
+    """Usage text for gipfeli-specific task actions."""
+    destinations = ", ".join(get_gipfeli_destinations())
+    return (
+        "Gipfeli task usage:\n"
+        "/task gipfeli <destination>\n"
+        "/task gipfeli status\n"
+        "/task gipfeli cancel\n\n"
+        f"Available destinations: {destinations}"
+    )
+
+
+def task_usage() -> str:
+    """Usage text for /task command."""
+    return (
+        "Task command usage:\n"
+        "/task gipfeli\n"
+        "/task status\n"
+        "/task cancel"
+    )
+
+
 # Define a few command handlers. These usually take the two arguments update and
 # context.
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -243,6 +330,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Audio:\n"
         "/sound - Play a WAV sound from sounds/ (optional gain)\n\n"
         "/volume - Get/set Spot CAM volume (0-100)\n\n"
+        "Tasks:\n"
+        "/task gipfeli - Show gipfeli usage and destinations\n"
+        "/task gipfeli <destination> - Run delivery task\n"
+        "/task gipfeli status - Show gipfeli task status\n"
+        "/task status - Show global task state and progress\n"
+        "/task cancel - Cancel active task\n\n"
         "Other:\n"
         "/start - Start the bot\n"
         "/id - Show your Telegram ID\n"
@@ -705,6 +798,94 @@ async def volume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"Spot CAM volume set to {current:.1f}%.")
 
 
+async def task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Manage high-level tasks like gipfeli delivery."""
+    if not await authorize(update, "task"):
+        return
+
+    if not update.message:
+        return
+
+    raw_args = getattr(context, "args", [])
+    args = raw_args if isinstance(raw_args, list) else []
+    args = [arg.strip() for arg in args if arg and arg.strip()]
+
+    if not args:
+        await update.message.reply_text(task_usage())
+        return
+
+    command = args[0].lower()
+
+    if command == "status":
+        status = await task_manager.get_status()
+        await update.message.reply_text(
+            "Global task status:\n" + format_task_status_message(status)
+        )
+        return
+
+    if command == "cancel":
+        if not await authorize_operator(update):
+            return
+        _, message = await task_manager.cancel_active_task()
+        await update.message.reply_text(message)
+        return
+
+    if command != "gipfeli":
+        await update.message.reply_text(task_usage())
+        return
+
+    if len(args) == 1:
+        await update.message.reply_text(gipfeli_usage())
+        return
+
+    sub_or_destination = args[1].lower()
+    if sub_or_destination == "status":
+        status = await task_manager.get_status()
+        if status.task_name != "gipfeli" or status.state == TaskState.IDLE:
+            await update.message.reply_text(
+                "No gipfeli task has been started yet.\n"
+                "Use /task gipfeli <destination> to start one.\n"
+                "Use /task status for global task status."
+            )
+            return
+
+        await update.message.reply_text(
+            "Gipfeli task status:\n" + format_task_status_message(status)
+        )
+        return
+    if sub_or_destination == "cancel":
+        if not await authorize_operator(update):
+            return
+        _, message = await task_manager.cancel_active_task()
+        await update.message.reply_text(message)
+        return
+
+    if not await authorize_operator(update):
+        return
+
+    destination = " ".join(args[1:]).strip()
+    if not destination:
+        await update.message.reply_text(gipfeli_usage())
+        return
+
+    available_destinations = get_gipfeli_destinations()
+    destination_key = destination.lower()
+    if destination_key not in available_destinations:
+        await update.message.reply_text(
+            f"Unknown gipfeli destination '{destination}'.\n"
+            f"Available destinations: {', '.join(available_destinations)}\n"
+            "Use /task gipfeli to list usage and destinations."
+        )
+        return
+
+    async def send_status(msg: str) -> None:
+        if update.message:
+            await update.message.reply_text(msg)
+
+    ok, message = await task_manager.start_gipfeli_task(destination_key, send_status)
+    await update.message.reply_text(message)
+
+
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Echo the user message."""
     if not (update.message and update.message.text):
@@ -730,7 +911,8 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "/connect - Connect to SPOT robot\n"
         "/goto - Go to a location\n"
         "/sound - Play a sound\n"
-        "/volume - Get/set volume"
+        "/volume - Get/set volume\n"
+        "/task - Run task commands"
     )
 
 
@@ -774,6 +956,10 @@ async def post_shutdown(application: Application) -> None:
     global spot_controller
 
     logger.info("Bot shutting down - releasing SPOT resources...")
+
+    cancelled, _ = await task_manager.cancel_active_task()
+    if cancelled:
+        logger.info("Cancelled active task during shutdown")
 
     if spot_controller is not None:
         try:
@@ -826,6 +1012,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(goto_callback, pattern=f"^{CALLBACK_DATA_PREFIX}"))
     application.add_handler(CommandHandler("sound", sound))
     application.add_handler(CommandHandler("volume", volume))
+    application.add_handler(CommandHandler("task", task))
     application.add_handler(
         CallbackQueryHandler(sound_callback, pattern=f"^{SOUND_CALLBACK_DATA_PREFIX}")
     )

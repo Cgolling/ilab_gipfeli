@@ -20,6 +20,7 @@ COMMAND_REQUIRED_ROLE: dict[str, Role] = {
     "id": "viewer",
     "help": "viewer",
     "status": "viewer",
+    "task": "viewer",
     "connect": "operator",
     "disconnect": "operator",
     "goto": "operator",
