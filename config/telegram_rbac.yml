@@ -1,0 +1,6 @@
+chat_policy:
+  private_only: true
+
+admin_user_ids: [7817263022]
+
+users: {}

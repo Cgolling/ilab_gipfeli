@@ -32,6 +32,7 @@ Unsere Vision ist ein **Gipfeli-Delivery Service** innerhalb unseres Schulhauses
   - [Bot starten](#bot-starten)
 - [Projektstruktur](#projektstruktur)
 - [Bot-Befehle](#bot-befehle)
+- [Zugriffskontrolle](#zugriffskontrolle)
 - [Map Viewer](#map-viewer)
 - [Troubleshooting](#troubleshooting)
 - [Entwicklung](#entwicklung)
@@ -199,6 +200,10 @@ TELEGRAM_BOT_TOKEN=dein_telegram_token
 
 # Optional: Auto-Connect beim Bot-Start (true/false)
 SPOT_AUTO_CONNECT=true
+
+# Zugriffskontrolle (RBAC)
+TELEGRAM_RBAC_ENABLED=true
+TELEGRAM_RBAC_CONFIG_PATH=config/telegram_rbac.yml
 ```
 
 ### Telegram Bot erstellen
@@ -278,6 +283,7 @@ ilab_gipfeli/
 | Befehl | Beschreibung |
 |--------|--------------|
 | `/start` | Begrüssung und Übersicht |
+| `/id` | Eigene Telegram-ID und Chat-ID anzeigen |
 | `/help` | Liste aller Befehle |
 | `/connect` | Verbindung zu SPOT herstellen |
 | `/disconnect` | Verbindung trennen und Lease freigeben |
@@ -297,6 +303,34 @@ ilab_gipfeli/
 - Lege `.wav` Dateien in den Ordner `sounds/`
 - Starte z.B. mit `/sound` (Button-Auswahl), `/sound beep` oder `/sound beep 0.8`
 - Lautstärke mit `/volume` anzeigen oder mit `/volume 60` setzen
+
+---
+
+## Zugriffskontrolle
+
+Der Bot nutzt rollenbasierte Zugriffskontrolle (RBAC) mit den Rollen:
+- `viewer`: `/start`, `/id`, `/help`, `/status`
+- `operator`: zusätzlich `/connect`, `/disconnect`, `/goto`, `/sound`, `/volume`
+- `admin`: zusätzlich `/forceconnect`
+
+Konfiguration in `config/telegram_rbac.yml`.
+
+Beispiel:
+```yaml
+chat_policy:
+  private_only: true
+
+admin_user_ids:
+  - 123456789
+
+users:
+  "234567890": operator
+  "345678901": viewer
+```
+
+Standardverhalten:
+- Unbekannte User-IDs erhalten standardmäßig die Rolle **viewer**
+- Befehle werden nur in **privaten Chats** akzeptiert (`private_only: true`)
 
 ---
 

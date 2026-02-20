@@ -101,6 +101,8 @@ def mock_telegram_update():
     update = MagicMock()
     update.effective_user.mention_html.return_value = "<b>TestUser</b>"
     update.effective_user.id = 12345
+    update.effective_user.username = "test_user"
+    update.effective_chat.type = "private"
     update.message.reply_text = AsyncMock()
     update.message.reply_html = AsyncMock()
     update.message.text = "test message"

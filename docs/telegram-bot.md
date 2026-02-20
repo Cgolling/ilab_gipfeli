@@ -56,6 +56,7 @@ Respond to `/commands`:
 | Command | Handler | Purpose |
 |---------|---------|---------|
 | `/start` | `start()` | Greet new users |
+| `/id` | `id_command()` | Show Telegram user/chat IDs |
 | `/help` | `help_command()` | Show available commands |
 | `/connect` | `connect_spot()` | Connect to SPOT robot |
 | `/disconnect` | `disconnect_spot()` | Release lease and disconnect |
@@ -223,8 +224,23 @@ Users see friendly error messages, not stack traces.
 | File | Purpose |
 |------|---------|
 | `src/telegram/bot.py` | Main bot code |
+| `src/telegram/security.py` | RBAC and permission checks |
 | `src/logging_config.py` | Logging setup |
 | `.env` | Bot token (secret!) |
+| `config/telegram_rbac.yml` | User IDs and roles |
+
+## Authorization (RBAC)
+
+The bot enforces role-based access control for all commands:
+
+- `viewer`: `/start`, `/id`, `/help`, `/status`
+- `operator`: viewer + `/connect`, `/disconnect`, `/goto`, `/sound`, `/volume`
+- `admin`: operator + `/forceconnect`
+
+Policy:
+
+- Unknown users default to `viewer`.
+- Commands are accepted only in private chats when `private_only: true`.
 
 ## Troubleshooting
 

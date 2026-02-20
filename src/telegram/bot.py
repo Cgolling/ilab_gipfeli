@@ -24,6 +24,16 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from src.spot import SpotController
 from src.logging_config import setup_logging
+from src.telegram.security import (
+    CRITICAL_COMMANDS,
+    RbacConfig,
+    format_deny_message,
+    is_allowed,
+    is_private_chat,
+    load_rbac_config,
+    required_role_for_command,
+    resolve_user_role,
+)
 
 # Initialize logging (safe to call multiple times)
 setup_logging()
@@ -38,6 +48,9 @@ CALLBACK_DATA_PREFIX = "goto_"
 SOUND_CALLBACK_DATA_PREFIX = "sound_"
 SOUNDS_DIR = os.path.join(PROJECT_ROOT, "sounds")
 SPOT_AUTO_CONNECT_ENV = "SPOT_AUTO_CONNECT"
+RBAC_ENABLED_ENV = "TELEGRAM_RBAC_ENABLED"
+RBAC_CONFIG_PATH_ENV = "TELEGRAM_RBAC_CONFIG_PATH"
+DEFAULT_RBAC_CONFIG_PATH = os.path.join(PROJECT_ROOT, "config", "telegram_rbac.yml")
 
 # Global SPOT controller instance
 # Thread-safety note: python-telegram-bot uses a single-threaded async model,
@@ -46,6 +59,8 @@ SPOT_AUTO_CONNECT_ENV = "SPOT_AUTO_CONNECT"
 # which is also safe as those calls don't share mutable state.
 # Do NOT access this from external threads without proper synchronization.
 spot_controller: Optional[SpotController] = None
+rbac_config: Optional[RbacConfig] = None
+rbac_enabled: bool = False
 
 
 def env_var_is_true(name: str, default: bool = True) -> bool:
@@ -61,10 +76,128 @@ def env_var_is_true(name: str, default: bool = True) -> bool:
     return default
 
 
+def initialize_rbac() -> None:
+    """
+    Initialize RBAC settings from environment and YAML configuration.
+
+    Raises:
+        RuntimeError: If RBAC is enabled but configuration cannot be loaded.
+    """
+    global rbac_enabled, rbac_config
+
+    rbac_enabled = env_var_is_true(RBAC_ENABLED_ENV, default=True)
+    rbac_config = None
+
+    if not rbac_enabled:
+        logger.warning("RBAC disabled via %s=false", RBAC_ENABLED_ENV)
+        return
+
+    config_path = os.getenv(RBAC_CONFIG_PATH_ENV, DEFAULT_RBAC_CONFIG_PATH)
+    try:
+        rbac_config = load_rbac_config(config_path)
+    except Exception as e:
+        raise RuntimeError(
+            f"RBAC enabled, but config loading failed ({config_path}): {e}"
+        ) from e
+
+    logger.info(
+        "RBAC loaded from %s (private_only=%s, admins=%d, users=%d)",
+        config_path,
+        rbac_config.private_only,
+        len(rbac_config.admin_user_ids),
+        len(rbac_config.users),
+    )
+
+
+def extract_command_name(text: str) -> str:
+    """Extract command name from raw Telegram command text (without '/')."""
+    if not text.startswith("/"):
+        return ""
+    token = text.split(" ", 1)[0]
+    token = token[1:]  # remove leading slash
+    return token.split("@", 1)[0].strip().lower()
+
+
+async def _reply_access_denied(update: Update, message: str) -> None:
+    """Reply access denied via message or callback query context."""
+    if update.message:
+        await update.message.reply_text(message)
+        return
+
+    if update.callback_query:
+        try:
+            await update.callback_query.answer(message, show_alert=True)
+        except Exception:
+            pass
+        return
+
+
+async def authorize(update: Update, command_name: str) -> bool:
+    """
+    Check whether current user is authorized for a command.
+
+    Unknown commands default to viewer permission requirement.
+    """
+    if not rbac_enabled:
+        return True
+
+    if rbac_config is None:
+        await _reply_access_denied(update, "Access control is not configured.")
+        logger.error("RBAC enabled but config not initialized.")
+        return False
+
+    required_role = required_role_for_command(command_name) or "viewer"
+    user = update.effective_user
+
+    if user is None:
+        await _reply_access_denied(update, format_deny_message(required_role))
+        logger.warning("RBAC denied (missing user) for command=%s", command_name)
+        return False
+
+    if rbac_config.private_only and not is_private_chat(update):
+        await _reply_access_denied(
+            update,
+            "No access. This bot accepts commands only in private chat.",
+        )
+        logger.warning(
+            "RBAC denied (non-private chat): user_id=%s command=%s",
+            user.id,
+            command_name,
+        )
+        return False
+
+    actual_role = resolve_user_role(user.id, rbac_config)
+    if not is_allowed(actual_role, required_role):
+        await _reply_access_denied(update, format_deny_message(required_role))
+        logger.warning(
+            "RBAC denied: user_id=%s username=%s command=%s required=%s actual=%s",
+            user.id,
+            user.username,
+            command_name,
+            required_role,
+            actual_role,
+        )
+        return False
+
+    if command_name in CRITICAL_COMMANDS:
+        logger.info(
+            "RBAC allow critical: user_id=%s username=%s command=%s role=%s",
+            user.id,
+            user.username,
+            command_name,
+            actual_role,
+        )
+
+    return True
+
+
 # Define a few command handlers. These usually take the two arguments update and
 # context.
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /start is issued."""
+    if not await authorize(update, "start"):
+        return
+
     user = update.effective_user
     if not update.message or not user:
         return
@@ -74,8 +207,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show current Telegram user ID and chat ID."""
+    if not await authorize(update, "id"):
+        return
+
+    user = update.effective_user
+    chat = update.effective_chat
+    if not update.message or user is None or chat is None:
+        return
+
+    await update.message.reply_text(
+        f"Your Telegram user ID: {user.id}\n"
+        f"This chat ID: {chat.id}"
+    )
+
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
+    if not await authorize(update, "help"):
+        return
      
     if not update.message:
         return
@@ -94,6 +245,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/volume - Get/set Spot CAM volume (0-100)\n\n"
         "Other:\n"
         "/start - Start the bot\n"
+        "/id - Show your Telegram ID\n"
         "/help - Show this help message"
     )
 
@@ -146,6 +298,9 @@ def _build_sound_keyboard(sound_names: list[str]) -> InlineKeyboardMarkup:
 async def connect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Connect to SPOT robot."""
     global spot_controller
+
+    if not await authorize(update, "connect"):
+        return
     
     if not update.message:
         return
@@ -175,6 +330,10 @@ async def connect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def forceconnect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Force connect to SPOT robot, taking the lease from any other client."""
     global spot_controller
+
+    if not await authorize(update, "forceconnect"):
+        return
+
     if not update.message:
         return
 
@@ -214,6 +373,10 @@ async def forceconnect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def disconnect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Disconnect from SPOT and release the lease."""
     global spot_controller
+
+    if not await authorize(update, "disconnect"):
+        return
+
     if not update.message:
         return
 
@@ -238,6 +401,9 @@ async def disconnect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def status_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show current SPOT robot status."""
+    if not await authorize(update, "status"):
+        return
+
     if not update.message:
         return
     
@@ -295,6 +461,9 @@ async def status_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def goto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send inline keyboard with location options."""
+    if not await authorize(update, "goto"):
+        return
+
     if not update.message:
         return
     keyboard = [
@@ -313,6 +482,9 @@ async def goto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def goto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle goto button presses and navigate SPOT to the selected location."""
+    if not await authorize(update, "goto"):
+        return
+
     if not update.callback_query:
         return
     
@@ -353,6 +525,9 @@ async def goto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def sound(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Play a sound from local WAV files via Spot CAM audio service."""
+    if not await authorize(update, "sound"):
+        return
+
     if not update.message:
         return
 
@@ -426,6 +601,9 @@ async def sound(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def sound_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle sound button presses and play selected WAV file."""
+    if not await authorize(update, "sound"):
+        return
+
     if not update.callback_query:
         return
 
@@ -478,6 +656,9 @@ async def volume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     - /volume
     - /volume <0..100>
     """
+    if not await authorize(update, "volume"):
+        return
+
     if not update.message:
         return
 
@@ -535,10 +716,16 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Inform the user that the command was not found."""
     if not update.message:
         return
+
+    command_name = extract_command_name(update.message.text or "")
+    if not await authorize(update, command_name):
+        return
+
     await update.message.reply_text(
         "Sorry, I didn't understand that command.\n\n"
         "Available commands:\n"
         "/start - Start the bot\n"
+        "/id - Show your Telegram ID\n"
         "/help - Get help\n"
         "/connect - Connect to SPOT robot\n"
         "/goto - Go to a location\n"
@@ -614,6 +801,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 def main() -> None:
     """Start the bot."""
     load_dotenv()
+    initialize_rbac()
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN not found in environment variables")
@@ -644,6 +832,7 @@ def main() -> None:
 
     # General commands
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("id", id_command))
     application.add_handler(CommandHandler("help", help_command))
 
     # on non command i.e message - echo the message on Telegram

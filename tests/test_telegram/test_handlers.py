@@ -16,7 +16,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.telegram.bot import (
     start,
+    id_command,
     help_command,
+    forceconnect_spot,
     goto,
     goto_callback,
     sound,
@@ -26,6 +28,14 @@ from src.telegram.bot import (
     CALLBACK_DATA_PREFIX,
     SOUND_CALLBACK_DATA_PREFIX,
 )
+from src.telegram.security import RbacConfig
+
+
+@pytest.fixture(autouse=True)
+def disable_rbac_by_default():
+    """Keep legacy handler tests focused on command behavior unless overridden."""
+    with patch("src.telegram.bot.rbac_enabled", False), patch("src.telegram.bot.rbac_config", None):
+        yield
 
 
 class TestStartCommand:
@@ -68,6 +78,7 @@ class TestHelpCommand:
 
         # Check all commands are mentioned
         assert "/start" in help_text
+        assert "/id" in help_text
         assert "/help" in help_text
         assert "/connect" in help_text
         assert "/goto" in help_text
@@ -97,6 +108,25 @@ class TestEnvHelpers:
         """False-like strings should parse to False."""
         monkeypatch.setenv("SPOT_AUTO_CONNECT", "false")
         assert env_var_is_true("SPOT_AUTO_CONNECT", default=True) is False
+
+
+class TestIdCommand:
+    """Tests for /id command."""
+
+    @pytest.mark.asyncio
+    async def test_id_command_shows_user_and_chat_id(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        """ID command should return user and chat IDs."""
+        mock_telegram_update.effective_user.id = 12345
+        mock_telegram_update.effective_chat.id = 67890
+
+        await id_command(mock_telegram_update, mock_telegram_context)
+
+        mock_telegram_update.message.reply_text.assert_called_once()
+        msg = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "12345" in msg
+        assert "67890" in msg
 
 
 class TestGotoCommand:
@@ -419,3 +449,102 @@ class TestVolumeCommand:
 
         reply = mock_telegram_update.message.reply_text.call_args[0][0]
         assert "must be a number" in reply.lower()
+
+
+class TestRbacEnforcement:
+    """RBAC enforcement checks on handlers."""
+
+    @pytest.fixture
+    def rbac_config(self):
+        return RbacConfig(
+            private_only=True,
+            admin_user_ids={111},
+            users={222: "operator", 333: "viewer"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_viewer_denied_for_operator_command(
+        self, mock_telegram_update, mock_telegram_context, rbac_config
+    ):
+        """Viewer should not be able to run /goto."""
+        mock_telegram_update.effective_user.id = 333
+        with patch("src.telegram.bot.rbac_enabled", True), patch(
+            "src.telegram.bot.rbac_config", rbac_config
+        ):
+            await goto(mock_telegram_update, mock_telegram_context)
+
+        deny = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "required role: operator" in deny.lower()
+
+    @pytest.mark.asyncio
+    async def test_operator_allowed_for_goto(
+        self, mock_telegram_update, mock_telegram_context, rbac_config
+    ):
+        """Operator should be able to use /goto."""
+        mock_telegram_update.effective_user.id = 222
+        with patch("src.telegram.bot.rbac_enabled", True), patch(
+            "src.telegram.bot.rbac_config", rbac_config
+        ):
+            await goto(mock_telegram_update, mock_telegram_context)
+
+        mock_telegram_update.message.reply_text.assert_called_once()
+        msg = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "where" in msg.lower()
+
+    @pytest.mark.asyncio
+    async def test_operator_denied_for_admin_command(
+        self, mock_telegram_update, mock_telegram_context, rbac_config
+    ):
+        """Operator should not be able to run /forceconnect."""
+        mock_telegram_update.effective_user.id = 222
+        with patch("src.telegram.bot.rbac_enabled", True), patch(
+            "src.telegram.bot.rbac_config", rbac_config
+        ), patch("src.telegram.bot.SpotController") as mock_controller_cls:
+            await forceconnect_spot(mock_telegram_update, mock_telegram_context)
+
+        deny = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "required role: admin" in deny.lower()
+        mock_controller_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_private_only_policy_blocks_group_chat(
+        self, mock_telegram_update, mock_telegram_context, rbac_config
+    ):
+        """Commands should be denied in group chats when private_only is enabled."""
+        mock_telegram_update.effective_user.id = 111
+        mock_telegram_update.effective_chat.type = "group"
+        with patch("src.telegram.bot.rbac_enabled", True), patch(
+            "src.telegram.bot.rbac_config", rbac_config
+        ):
+            await help_command(mock_telegram_update, mock_telegram_context)
+
+        deny = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "private chat" in deny.lower()
+
+    @pytest.mark.asyncio
+    async def test_unknown_user_defaults_to_viewer_and_can_use_help(
+        self, mock_telegram_update, mock_telegram_context, rbac_config
+    ):
+        """Unknown users should be treated as viewer for low-risk commands."""
+        mock_telegram_update.effective_user.id = 999999
+        with patch("src.telegram.bot.rbac_enabled", True), patch(
+            "src.telegram.bot.rbac_config", rbac_config
+        ):
+            await help_command(mock_telegram_update, mock_telegram_context)
+
+        help_text = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "SPOT Robot Control Bot" in help_text
+
+    @pytest.mark.asyncio
+    async def test_unknown_user_defaults_to_viewer_and_cannot_use_operator_command(
+        self, mock_telegram_update, mock_telegram_context, rbac_config
+    ):
+        """Unknown users should still be blocked from operator/admin commands."""
+        mock_telegram_update.effective_user.id = 999999
+        with patch("src.telegram.bot.rbac_enabled", True), patch(
+            "src.telegram.bot.rbac_config", rbac_config
+        ):
+            await goto(mock_telegram_update, mock_telegram_context)
+
+        deny = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "required role: operator" in deny.lower()
