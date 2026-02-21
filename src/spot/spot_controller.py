@@ -13,12 +13,13 @@ setup_logging()
 
 import bosdyn.client
 import bosdyn.client.util
-from bosdyn.api import robot_state_pb2
+from bosdyn.api import image_pb2, robot_state_pb2
 from bosdyn.api.graph_nav import graph_nav_pb2, map_pb2, nav_pb2
 from bosdyn.api.spot_cam import audio_pb2
 from bosdyn.client.exceptions import ResponseError
 from bosdyn.client.frame_helpers import get_odom_tform_body
 from bosdyn.client.graph_nav import GraphNavClient
+from bosdyn.client.image import ImageClient, build_image_request
 from bosdyn.client.lease import LeaseClient, LeaseKeepAlive, ResourceAlreadyClaimedError
 from bosdyn.client.power import PowerClient, power_on_motors, safe_power_off_motors
 from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient
@@ -40,6 +41,7 @@ HEARTBEAT_INTERVAL_SECONDS = 3       # How often to send status updates during n
 NAVIGATION_VELOCITY_LIMIT = 1.0      # Max velocity limit passed to navigate_to (m/s)
 NAVIGATION_POLL_INTERVAL = 0.5       # How often to poll navigation status
 POWER_STATE_POLL_INTERVAL = 0.25     # How often to poll power state during power-on
+JPEG_QUALITY_PERCENT = 85            # Snapshot JPEG quality for perception capture
 
 
 def id_to_short_code(waypoint_id: str) -> Optional[str]:
@@ -224,6 +226,7 @@ class SpotController:
         self.robot_state_client = None
         self.power_client = None
         self.audio_client = None
+        self.image_client = None
 
         # Graph state
         self._current_graph = None
@@ -269,6 +272,7 @@ class SpotController:
             "lease_owner": None,
             "estop_status": None,
             "audio_available": self.audio_client is not None,
+            "image_available": self.image_client is not None,
         }
 
         if not self.robot:
@@ -414,6 +418,7 @@ class SpotController:
             GraphNavClient.default_service_name)
         self.power_client = self.robot.ensure_client(
             PowerClient.default_service_name)
+        self._initialize_optional_image_client()
         self._initialize_optional_audio_client()
 
         # Check initial power state
@@ -431,6 +436,16 @@ class SpotController:
         except Exception as e:
             self.audio_client = None
             logger.info(f"Spot CAM audio service unavailable: {e}")
+
+    def _initialize_optional_image_client(self) -> None:
+        """Initialize image client if available on this robot."""
+        try:
+            assert self.robot is not None
+            self.image_client = self.robot.ensure_client(ImageClient.default_service_name)
+            logger.info("Image service available")
+        except Exception as e:
+            self.image_client = None
+            logger.info(f"Image service unavailable: {e}")
 
     def _acquire_lease(self) -> None:
         """
@@ -836,6 +851,61 @@ class SpotController:
         except Exception as e:
             logger.exception(f"Failed to set audio volume to {target}: {e}")
             return False
+
+    def list_image_sources(self) -> list[str]:
+        """
+        List available image sources from SPOT.
+
+        Returns:
+            Sorted list of source names. Empty list if unavailable.
+        """
+        if not self.is_connected or self.image_client is None:
+            return []
+
+        try:
+            sources = self.image_client.list_image_sources()
+            names = [source.name for source in sources if getattr(source, "name", None)]
+            return sorted(set(names))
+        except Exception as e:
+            logger.exception(f"Failed to list image sources: {e}")
+            return []
+
+    async def capture_image_jpeg(self, source_name: str) -> Optional[bytes]:
+        """
+        Capture a JPEG image from the given source.
+
+        Args:
+            source_name: Image source name as reported by list_image_sources().
+
+        Returns:
+            JPEG bytes on success, None on failure.
+        """
+        if not self.is_connected or self.image_client is None:
+            return None
+
+        try:
+            request = build_image_request(
+                source_name,
+                quality_percent=JPEG_QUALITY_PERCENT,
+                image_format=image_pb2.Image.FORMAT_JPEG,
+            )
+            responses = await asyncio.to_thread(self.image_client.get_image, [request])
+            if not responses:
+                return None
+
+            shot = responses[0].shot.image
+            if shot.format != image_pb2.Image.FORMAT_JPEG:
+                logger.warning(
+                    "Image source '%s' returned non-JPEG format=%s",
+                    source_name,
+                    shot.format,
+                )
+                return None
+
+            return bytes(shot.data)
+        except Exception as e:
+            logger.exception(f"Failed to capture image from source '{source_name}': {e}")
+            return None
 
     async def disconnect(self):
         """Disconnect from SPOT and cleanup."""

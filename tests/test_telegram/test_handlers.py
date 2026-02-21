@@ -24,6 +24,7 @@ from src.telegram.bot import (
     sound,
     sound_callback,
     volume,
+    snapshot,
     env_var_is_true,
     CALLBACK_DATA_PREFIX,
     SOUND_CALLBACK_DATA_PREFIX,
@@ -84,6 +85,7 @@ class TestHelpCommand:
         assert "/goto" in help_text
         assert "/sound" in help_text
         assert "/volume" in help_text
+        assert "/snapshot" in help_text
 
     @pytest.mark.asyncio
     async def test_help_mentions_spot_robot(
@@ -449,6 +451,62 @@ class TestVolumeCommand:
 
         reply = mock_telegram_update.message.reply_text.call_args[0][0]
         assert "must be a number" in reply.lower()
+
+
+class TestSnapshotCommand:
+    """Tests for /snapshot command."""
+
+    @pytest.mark.asyncio
+    async def test_snapshot_without_args_lists_sources(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        mock_telegram_context.args = []
+        manager = MagicMock()
+        manager.list_sources = AsyncMock(
+            return_value=(True, "ok", ["frontleft_fisheye_image", "frontright_fisheye_image"])
+        )
+
+        with patch("src.telegram.bot.snapshot_manager", manager):
+            await snapshot(mock_telegram_update, mock_telegram_context)
+
+        reply = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "Available image sources" in reply
+        assert "frontleft_fisheye_image" in reply
+
+    @pytest.mark.asyncio
+    async def test_snapshot_with_source_captures_file(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        mock_telegram_context.args = ["frontleft_fisheye_image"]
+        manager = MagicMock()
+        result = MagicMock()
+        result.source = "frontleft_fisheye_image"
+        result.saved_path = "logs/perception_snapshots/x.jpg"
+        result.byte_size = 1234
+        result.captured_at.strftime.return_value = "2026-02-21 10:00:00 UTC"
+        manager.capture_snapshot = AsyncMock(return_value=(True, "saved", result))
+
+        with patch("src.telegram.bot.snapshot_manager", manager):
+            await snapshot(mock_telegram_update, mock_telegram_context)
+
+        calls = [call[0][0] for call in mock_telegram_update.message.reply_text.call_args_list]
+        assert any("Capturing snapshot" in text for text in calls)
+        assert any("Snapshot captured" in text for text in calls)
+
+    @pytest.mark.asyncio
+    async def test_snapshot_failure_shows_usage(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        mock_telegram_context.args = ["unknown_source"]
+        manager = MagicMock()
+        manager.capture_snapshot = AsyncMock(return_value=(False, "Unknown source", None))
+
+        with patch("src.telegram.bot.snapshot_manager", manager):
+            await snapshot(mock_telegram_update, mock_telegram_context)
+
+        final_reply = mock_telegram_update.message.reply_text.call_args_list[-1][0][0]
+        assert "Unknown source" in final_reply
+        assert "Snapshot command usage" in final_reply
 
 
 class TestRbacEnforcement:

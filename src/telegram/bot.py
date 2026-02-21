@@ -22,6 +22,7 @@ from telegram import ForceReply, Update, InlineKeyboardButton, InlineKeyboardMar
 from telegram.error import BadRequest, NetworkError
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
+from src.perception import SnapshotManager
 from src.spot import SpotController
 from src.spot.spot_controller import WAYPOINTS
 from src.logging_config import setup_logging
@@ -54,6 +55,7 @@ DEFAULT_MAP_PATH = os.path.join(PROJECT_ROOT, "maps/map_catacombs_01")
 CALLBACK_DATA_PREFIX = "goto_"
 SOUND_CALLBACK_DATA_PREFIX = "sound_"
 SOUNDS_DIR = os.path.join(PROJECT_ROOT, "sounds")
+SNAPSHOTS_DIR = os.path.join(PROJECT_ROOT, "logs", "perception_snapshots")
 SPOT_AUTO_CONNECT_ENV = "SPOT_AUTO_CONNECT"
 RBAC_ENABLED_ENV = "TELEGRAM_RBAC_ENABLED"
 RBAC_CONFIG_PATH_ENV = "TELEGRAM_RBAC_CONFIG_PATH"
@@ -72,6 +74,10 @@ task_manager = TaskManager(
     lambda: spot_controller,
     pickup_waypoint=GIPFELI_PICKUP_WAYPOINT,
     min_battery_percent=MIN_BATTERY_PERCENT,
+)
+snapshot_manager = SnapshotManager(
+    lambda: spot_controller,
+    output_dir=SNAPSHOTS_DIR,
 )
 
 
@@ -278,6 +284,16 @@ def task_usage() -> str:
     )
 
 
+def snapshot_usage() -> str:
+    """Usage text for snapshot command."""
+    return (
+        "Snapshot command usage:\n"
+        "/snapshot\n"
+        "/snapshot <source>\n\n"
+        "Use /snapshot without args to list available image sources."
+    )
+
+
 # Define a few command handlers. These usually take the two arguments update and
 # context.
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -330,6 +346,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Audio:\n"
         "/sound - Play a WAV sound from sounds/ (optional gain)\n\n"
         "/volume - Get/set Spot CAM volume (0-100)\n\n"
+        "Perception:\n"
+        "/snapshot - List image sources\n"
+        "/snapshot <source> - Capture and save one JPEG snapshot\n\n"
         "Tasks:\n"
         "/task gipfeli - Show gipfeli usage and destinations\n"
         "/task gipfeli <destination> - Run delivery task\n"
@@ -798,6 +817,48 @@ async def volume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"Spot CAM volume set to {current:.1f}%.")
 
 
+async def snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """List image sources or capture a snapshot from a selected source."""
+    if not await authorize(update, "snapshot"):
+        return
+
+    if not update.message:
+        return
+
+    raw_args = getattr(context, "args", [])
+    args = raw_args if isinstance(raw_args, list) else []
+    args = [arg.strip() for arg in args if arg and arg.strip()]
+
+    if not args:
+        ok, message, sources = await snapshot_manager.list_sources()
+        if not ok:
+            await update.message.reply_text(f"{message}\n\n{snapshot_usage()}")
+            return
+
+        await update.message.reply_text(
+            "Available image sources:\n"
+            + "\n".join(f"- {source}" for source in sources)
+            + "\n\n"
+            + snapshot_usage()
+        )
+        return
+
+    source = " ".join(args)
+    await update.message.reply_text(f"Capturing snapshot from '{source}'...")
+    ok, message, result = await snapshot_manager.capture_snapshot(source)
+    if not ok or result is None:
+        await update.message.reply_text(f"{message}\n\n{snapshot_usage()}")
+        return
+
+    await update.message.reply_text(
+        "Snapshot captured.\n"
+        f"Source: {result.source}\n"
+        f"Saved to: {result.saved_path}\n"
+        f"Size: {result.byte_size} bytes\n"
+        f"Captured at: {result.captured_at.strftime('%Y-%m-%d %H:%M:%S UTC')}"
+    )
+
+
 async def task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Manage high-level tasks like gipfeli delivery."""
     if not await authorize(update, "task"):
@@ -912,6 +973,7 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "/goto - Go to a location\n"
         "/sound - Play a sound\n"
         "/volume - Get/set volume\n"
+        "/snapshot - List/capture camera snapshots\n"
         "/task - Run task commands"
     )
 
@@ -1012,6 +1074,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(goto_callback, pattern=f"^{CALLBACK_DATA_PREFIX}"))
     application.add_handler(CommandHandler("sound", sound))
     application.add_handler(CommandHandler("volume", volume))
+    application.add_handler(CommandHandler("snapshot", snapshot))
     application.add_handler(CommandHandler("task", task))
     application.add_handler(
         CallbackQueryHandler(sound_callback, pattern=f"^{SOUND_CALLBACK_DATA_PREFIX}")
