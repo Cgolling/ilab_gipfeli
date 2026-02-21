@@ -1,6 +1,7 @@
 """SPOT Robot Controller for Telegram Bot integration."""
 
 import asyncio
+from dataclasses import dataclass
 import logging
 import os
 import time
@@ -42,6 +43,14 @@ NAVIGATION_VELOCITY_LIMIT = 1.0      # Max velocity limit passed to navigate_to 
 NAVIGATION_POLL_INTERVAL = 0.5       # How often to poll navigation status
 POWER_STATE_POLL_INTERVAL = 0.25     # How often to poll power state during power-on
 JPEG_QUALITY_PERCENT = 85            # Snapshot JPEG quality for perception capture
+
+
+@dataclass(frozen=True, slots=True)
+class WebRTCContext:
+    """Minimal data required to start Spot CAM WebRTC."""
+
+    hostname: str
+    token: str
 
 
 def id_to_short_code(waypoint_id: str) -> Optional[str]:
@@ -273,6 +282,7 @@ class SpotController:
             "estop_status": None,
             "audio_available": self.audio_client is not None,
             "image_available": self.image_client is not None,
+            "webrtc_available": self.is_webrtc_available(),
         }
 
         if not self.robot:
@@ -785,6 +795,19 @@ class SpotController:
             logger.exception(f"Failed to play WAV file '{wav_path}': {e}")
             await status_callback(f"Failed to play sound: {e}")
             return False
+
+    def is_webrtc_available(self) -> bool:
+        """Return True when Spot CAM WebRTC can be attempted."""
+        return self.is_connected and self.audio_client is not None and self.robot is not None
+
+    def get_webrtc_context(self) -> Optional[WebRTCContext]:
+        """Return hostname/token pair for Spot CAM WebRTC signaling."""
+        if not self.is_webrtc_available() or self.robot is None:
+            return None
+        token = getattr(self.robot, "user_token", None)
+        if not token:
+            return None
+        return WebRTCContext(hostname=self.hostname, token=str(token))
 
     def _read_sound_file(self, wav_path: str) -> bytes:
         """Read WAV file bytes from disk."""

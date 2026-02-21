@@ -292,6 +292,8 @@ ilab_gipfeli/
 | `/goto` | SPOT zu einem Standort navigieren |
 | `/sound` | WAV-Datei über Spot CAM abspielen |
 | `/volume` | Spot CAM Lautstärke lesen/setzen (0-100) |
+| `/snapshot` | Kameraquellen anzeigen oder Einzelbild aufnehmen |
+| `/record` | Aufnahme starten/stoppen (WebRTC oder Timelapse) |
 | `/task` | Missions-/Task-Steuerung (z.B. Gipfeli-Lieferung) |
 
 **Verfügbare Standorte für `/goto`:**
@@ -304,6 +306,15 @@ ilab_gipfeli/
 - Lege `.wav` Dateien in den Ordner `sounds/`
 - Starte z.B. mit `/sound` (Button-Auswahl), `/sound beep` oder `/sound beep 0.8`
 - Lautstärke mit `/volume` anzeigen oder mit `/volume 60` setzen
+
+**Perception mit `/snapshot` und `/record`:**
+- `/snapshot` zeigt verfügbare Image-Sources
+- `/snapshot <source>` speichert ein JPEG und sendet es im Chat
+- `/record start` versucht Spot CAM WebRTC-Aufnahme (ohne Source)
+- `/record start <source>` nutzt Timelapse über Image-Service
+- `/record stop` finalisiert und sendet das Video
+- `/record abort` verwirft eine laufende Aufnahme
+- `/record status` zeigt State, Backend, Dauer und Audio-Status
 
 **Tasks mit `/task`:**
 - `/task status` ist der **globale** Task-Status (später für mehrere Task-Typen/Queues)
@@ -341,7 +352,7 @@ Hinweis:
 
 Der Bot nutzt rollenbasierte Zugriffskontrolle (RBAC) mit den Rollen:
 - `viewer`: `/start`, `/id`, `/help`, `/status`, `/task status`
-- `operator`: zusätzlich `/connect`, `/disconnect`, `/goto`, `/sound`, `/volume`, `/task gipfeli ...`, `/task cancel`
+- `operator`: zusätzlich `/connect`, `/disconnect`, `/goto`, `/sound`, `/volume`, `/snapshot`, `/record`, `/task gipfeli ...`, `/task cancel`
 - `admin`: zusätzlich `/forceconnect`
 
 Konfiguration in `config/telegram_rbac.yml`.

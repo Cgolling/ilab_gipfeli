@@ -90,6 +90,7 @@ class TestCommandMapping:
         assert required_role_for_command("id") == "viewer"
         assert required_role_for_command("task") == "viewer"
         assert required_role_for_command("snapshot") == "operator"
+        assert required_role_for_command("record") == "operator"
         assert required_role_for_command("goto") == "operator"
         assert required_role_for_command("forceconnect") == "admin"
 

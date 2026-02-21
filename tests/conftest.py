@@ -105,6 +105,8 @@ def mock_telegram_update():
     update.effective_chat.type = "private"
     update.message.reply_text = AsyncMock()
     update.message.reply_html = AsyncMock()
+    update.message.reply_photo = AsyncMock()
+    update.message.reply_video = AsyncMock()
     update.message.text = "test message"
     return update
 

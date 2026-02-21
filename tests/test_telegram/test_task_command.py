@@ -39,7 +39,10 @@ async def test_task_without_args_shows_usage(mock_telegram_update, mock_telegram
 
     reply = mock_telegram_update.message.reply_text.call_args[0][0]
     assert "/task gipfeli" in reply
-    assert "/task gipfeli <destination>" not in reply
+    assert "/task gipfeli <destination>" in reply
+    assert "/task gipfeli status" in reply
+    assert "/task status" in reply
+    assert "/task cancel" in reply
 
 
 @pytest.mark.asyncio

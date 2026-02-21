@@ -27,6 +27,7 @@ COMMAND_REQUIRED_ROLE: dict[str, Role] = {
     "sound": "operator",
     "volume": "operator",
     "snapshot": "operator",
+    "record": "operator",
     "forceconnect": "admin",
 }
 
@@ -37,6 +38,7 @@ CRITICAL_COMMANDS: set[str] = {
     "sound",
     "volume",
     "snapshot",
+    "record",
     "forceconnect",
 }
 

@@ -11,6 +11,7 @@ via Telegram, including navigation to predefined waypoints.
 
 import logging
 import os
+from pathlib import Path
 import sys
 from typing import Optional
 
@@ -22,7 +23,7 @@ from telegram import ForceReply, Update, InlineKeyboardButton, InlineKeyboardMar
 from telegram.error import BadRequest, NetworkError
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
-from src.perception import SnapshotManager
+from src.perception import RecordingManager, RecordingState, SnapshotManager
 from src.spot import SpotController
 from src.spot.spot_controller import WAYPOINTS
 from src.logging_config import setup_logging
@@ -56,6 +57,7 @@ CALLBACK_DATA_PREFIX = "goto_"
 SOUND_CALLBACK_DATA_PREFIX = "sound_"
 SOUNDS_DIR = os.path.join(PROJECT_ROOT, "sounds")
 SNAPSHOTS_DIR = os.path.join(PROJECT_ROOT, "logs", "perception_snapshots")
+RECORDINGS_DIR = os.path.join(PROJECT_ROOT, "logs", "perception_recordings")
 SPOT_AUTO_CONNECT_ENV = "SPOT_AUTO_CONNECT"
 RBAC_ENABLED_ENV = "TELEGRAM_RBAC_ENABLED"
 RBAC_CONFIG_PATH_ENV = "TELEGRAM_RBAC_CONFIG_PATH"
@@ -78,6 +80,10 @@ task_manager = TaskManager(
 snapshot_manager = SnapshotManager(
     lambda: spot_controller,
     output_dir=SNAPSHOTS_DIR,
+)
+recording_manager = RecordingManager(
+    lambda: spot_controller,
+    output_dir=RECORDINGS_DIR,
 )
 
 
@@ -278,9 +284,11 @@ def task_usage() -> str:
     """Usage text for /task command."""
     return (
         "Task command usage:\n"
-        "/task gipfeli\n"
-        "/task status\n"
-        "/task cancel"
+        "/task gipfeli - Show gipfeli usage and destinations\n"
+        "/task gipfeli <destination> - Run delivery task\n"
+        "/task gipfeli status - Show gipfeli task status\n"
+        "/task status - Show global task state and progress\n"
+        "/task cancel - Cancel active task"
     )
 
 
@@ -292,6 +300,51 @@ def snapshot_usage() -> str:
         "/snapshot <source>\n\n"
         "Use /snapshot without args to list available image sources."
     )
+
+
+def record_usage() -> str:
+    """Usage text for record command."""
+    return (
+        "Record command usage:\n"
+        "/record start [source]\n"
+        "/record stop\n"
+        "/record abort\n"
+        "/record status\n\n"
+        "Without source, /record start tries Spot CAM WebRTC.\n"
+        "Use /snapshot to list image sources for timelapse."
+    )
+
+
+def format_record_status(status) -> str:
+    """Build human-readable recording status text."""
+    lines = [
+        f"State: {status.state.value}",
+        f"Backend: {status.backend or '-'}",
+        f"Source: {status.source or '-'}",
+        f"Frames: {status.frame_count}",
+        f"Duration: {status.duration_seconds:.1f}s",
+        f"Audio: {'yes' if getattr(status, 'has_audio', False) else 'no'}",
+    ]
+    if status.started_at:
+        lines.append(f"Started: {status.started_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    lines.append(f"Updated: {status.updated_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    if status.output_path:
+        lines.append(f"Output: {status.output_path}")
+    if status.error:
+        lines.append(f"Last error: {status.error}")
+    return "\n".join(lines)
+
+
+def get_effective_user_role(update: Update) -> str:
+    """Resolve effective user role for role-specific response behavior."""
+    if not rbac_enabled or rbac_config is None:
+        return "operator"
+
+    user = update.effective_user
+    if user is None:
+        return "viewer"
+
+    return resolve_user_role(user.id, rbac_config)
 
 
 # Define a few command handlers. These usually take the two arguments update and
@@ -347,16 +400,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/sound - Play a WAV sound from sounds/ (optional gain)\n\n"
         "/volume - Get/set Spot CAM volume (0-100)\n\n"
         "Perception:\n"
-        "/snapshot - List image sources\n"
-        "/snapshot <source> - Capture and save one JPEG snapshot\n\n"
+        "/snapshot - Snapshot commands (sources, capture)\n"
+        "/record - Recording commands (start, stop, abort, status)\n\n"
         "Tasks:\n"
-        "/task gipfeli - Show gipfeli usage and destinations\n"
-        "/task gipfeli <destination> - Run delivery task\n"
-        "/task gipfeli status - Show gipfeli task status\n"
-        "/task status - Show global task state and progress\n"
-        "/task cancel - Cancel active task\n\n"
+        "/task - Task commands and status\n\n"
         "Other:\n"
-        "/start - Start the bot\n"
+        "/start - Show welcome message\n"
         "/id - Show your Telegram ID\n"
         "/help - Show this help message"
     )
@@ -828,6 +877,7 @@ async def snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     raw_args = getattr(context, "args", [])
     args = raw_args if isinstance(raw_args, list) else []
     args = [arg.strip() for arg in args if arg and arg.strip()]
+    is_admin_request = get_effective_user_role(update) == "admin"
 
     if not args:
         ok, message, sources = await snapshot_manager.list_sources()
@@ -850,13 +900,110 @@ async def snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"{message}\n\n{snapshot_usage()}")
         return
 
-    await update.message.reply_text(
-        "Snapshot captured.\n"
-        f"Source: {result.source}\n"
-        f"Saved to: {result.saved_path}\n"
-        f"Size: {result.byte_size} bytes\n"
-        f"Captured at: {result.captured_at.strftime('%Y-%m-%d %H:%M:%S UTC')}"
-    )
+    try:
+        image_path = Path(result.saved_path)
+        with image_path.open("rb") as image_file:
+            if is_admin_request:
+                await update.message.reply_photo(
+                    photo=image_file,
+                    caption=f"Snapshot from '{result.source}'",
+                )
+            else:
+                await update.message.reply_photo(photo=image_file)
+    except Exception as exc:
+        logger.warning("Could not send snapshot image in chat: %s", exc)
+        await update.message.reply_text(
+            "Snapshot captured, but image upload to chat failed."
+        )
+        return
+
+    if is_admin_request:
+        await update.message.reply_text(
+            "Snapshot captured.\n"
+            f"Source: {result.source}\n"
+            f"Saved to: {result.saved_path}\n"
+            f"Size: {result.byte_size} bytes\n"
+            f"Captured at: {result.captured_at.strftime('%Y-%m-%d %H:%M:%S UTC')}"
+        )
+
+
+async def record(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Manage WebRTC/timelapse recordings."""
+    if not await authorize(update, "record"):
+        return
+
+    if not update.message:
+        return
+
+    raw_args = getattr(context, "args", [])
+    args = raw_args if isinstance(raw_args, list) else []
+    args = [arg.strip() for arg in args if arg and arg.strip()]
+
+    if not args:
+        await update.message.reply_text(record_usage())
+        return
+
+    action = args[0].lower()
+
+    if action == "status":
+        status = await recording_manager.get_status()
+        await update.message.reply_text("Recording status:\n" + format_record_status(status))
+        return
+
+    if action == "start":
+        source: Optional[str] = " ".join(args[1:]).strip() if len(args) > 1 else None
+        if source == "":
+            source = None
+        ok, message = await recording_manager.start_recording(source)
+        if ok:
+            await update.message.reply_text(message)
+        else:
+            await update.message.reply_text(f"{message}\n\n{record_usage()}")
+        return
+
+    if action in {"stop", "end"}:
+        await update.message.reply_text("Finalizing recording...")
+        ok, message, result = await recording_manager.stop_recording()
+        if not ok or result is None:
+            await update.message.reply_text(f"{message}\n\n{record_usage()}")
+            return
+
+        try:
+            video_path = Path(result.video_path)
+            with video_path.open("rb") as video_file:
+                await update.message.reply_video(
+                    video=video_file,
+                    caption=(
+                        f"Recording ({result.backend}) from '{result.source}'\n"
+                        f"Frames: {result.frame_count}\n"
+                        f"Duration: {result.duration_seconds:.1f}s\n"
+                        f"Audio: {'yes' if result.has_audio else 'no'}"
+                    ),
+                )
+        except Exception as exc:
+            logger.warning("Could not send recording video in chat: %s", exc)
+            await update.message.reply_text(
+                "Recording finalized, but video upload failed.\n"
+                f"Saved to: {result.video_path}"
+            )
+            return
+
+        await update.message.reply_text(
+            "Recording finalized.\n"
+            f"Saved to: {result.video_path}\n"
+            f"Backend: {result.backend}\n"
+            f"Frames: {result.frame_count}\n"
+            f"Duration: {result.duration_seconds:.1f}s\n"
+            f"Audio: {'yes' if result.has_audio else 'no'}"
+        )
+        return
+
+    if action in {"abort", "terminate", "cancel"}:
+        ok, message = await recording_manager.abort_recording()
+        await update.message.reply_text(message if ok else f"{message}\n\n{record_usage()}")
+        return
+
+    await update.message.reply_text(record_usage())
 
 
 async def task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -966,7 +1113,7 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text(
         "Sorry, I didn't understand that command.\n\n"
         "Available commands:\n"
-        "/start - Start the bot\n"
+        "/start - Show welcome message\n"
         "/id - Show your Telegram ID\n"
         "/help - Get help\n"
         "/connect - Connect to SPOT robot\n"
@@ -974,6 +1121,7 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "/sound - Play a sound\n"
         "/volume - Get/set volume\n"
         "/snapshot - List/capture camera snapshots\n"
+        "/record - Start/stop/abort recordings\n"
         "/task - Run task commands"
     )
 
@@ -1022,6 +1170,10 @@ async def post_shutdown(application: Application) -> None:
     cancelled, _ = await task_manager.cancel_active_task()
     if cancelled:
         logger.info("Cancelled active task during shutdown")
+
+    aborted, _ = await recording_manager.abort_recording()
+    if aborted:
+        logger.info("Aborted active recording during shutdown")
 
     if spot_controller is not None:
         try:
@@ -1075,6 +1227,7 @@ def main() -> None:
     application.add_handler(CommandHandler("sound", sound))
     application.add_handler(CommandHandler("volume", volume))
     application.add_handler(CommandHandler("snapshot", snapshot))
+    application.add_handler(CommandHandler("record", record))
     application.add_handler(CommandHandler("task", task))
     application.add_handler(
         CallbackQueryHandler(sound_callback, pattern=f"^{SOUND_CALLBACK_DATA_PREFIX}")
