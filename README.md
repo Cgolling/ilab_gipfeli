@@ -193,18 +193,15 @@ cp .env.example .env
 # SPOT Roboter Credentials (vom iLab Team)
 BOSDYN_CLIENT_USERNAME=dein_username
 BOSDYN_CLIENT_PASSWORD=dein_password
-SPOT_HOSTNAME=192.168.80.3
 
 # Telegram Bot Token (siehe nächster Abschnitt)
 TELEGRAM_BOT_TOKEN=dein_telegram_token
 
-# Optional: Auto-Connect beim Bot-Start (true/false)
-SPOT_AUTO_CONNECT=true
-
-# Zugriffskontrolle (RBAC)
-TELEGRAM_RBAC_ENABLED=true
-TELEGRAM_RBAC_CONFIG_PATH=config/telegram_rbac.yml
 ```
+
+Nicht-sensitive Team-Einstellungen liegen in:
+- `config/app_settings.yml` (versioniert)
+- optional `config/app_settings.local.yml` (lokale Overrides, nicht versioniert)
 
 ### Telegram Bot erstellen
 
@@ -236,8 +233,9 @@ uv run python -m src.telegram.bot
 Nur Telegram ohne SPOT-Auto-Connect:
 
 ```bash
-# In .env setzen:
-SPOT_AUTO_CONNECT=false
+# In config/app_settings.local.yml setzen:
+telegram:
+  spot_auto_connect: false
 ```
 
 Du solltest sehen:

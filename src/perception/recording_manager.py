@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 import shutil
 import subprocess
@@ -14,6 +13,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Optional
 
+from src.app_settings import load_app_settings
 from src.perception.webrtc_session import (
     SpotCamWebRTCSession,
     WebRTCConfig,
@@ -88,30 +88,42 @@ class RecordingManager:
         webrtc_connect_timeout_seconds: Optional[float] = None,
         webrtc_ice_timeout_seconds: Optional[float] = None,
     ) -> None:
+        perception_settings = load_app_settings().perception
         self._controller_provider = controller_provider
         self._output_dir = Path(output_dir)
         self._frame_interval = max(0.2, frame_interval_seconds)
         self._ffmpeg_bin = ffmpeg_bin
 
-        self._backend_default = self._resolve_backend_default(backend_default)
+        self._backend_default = self._resolve_backend_default(
+            backend_default,
+            perception_settings.record_backend_default,
+        )
         self._webrtc_config = WebRTCConfig(
-            sdp_port=webrtc_sdp_port or _env_int("RECORD_WEBRTC_SDP_PORT", 31102),
-            sdp_filename=webrtc_sdp_filename or os.getenv("RECORD_WEBRTC_SDP_FILENAME", "h264.sdp"),
+            sdp_port=(
+                webrtc_sdp_port
+                if webrtc_sdp_port is not None
+                else perception_settings.webrtc_sdp_port
+            ),
+            sdp_filename=webrtc_sdp_filename or perception_settings.webrtc_sdp_filename,
             verify_tls=(
                 webrtc_verify_tls
                 if webrtc_verify_tls is not None
-                else _env_var_is_true("RECORD_WEBRTC_VERIFY_TLS", False)
+                else perception_settings.webrtc_verify_tls
             ),
-            ca_cert_path=webrtc_ca_cert_path or os.getenv("RECORD_WEBRTC_CA_CERT_PATH") or None,
+            ca_cert_path=(
+                webrtc_ca_cert_path
+                if webrtc_ca_cert_path is not None
+                else perception_settings.webrtc_ca_cert_path
+            ),
             connect_timeout_seconds=(
                 webrtc_connect_timeout_seconds
                 if webrtc_connect_timeout_seconds is not None
-                else _env_float("RECORD_WEBRTC_CONNECT_TIMEOUT_SECONDS", 10.0)
+                else perception_settings.webrtc_connect_timeout_seconds
             ),
             ice_timeout_seconds=(
                 webrtc_ice_timeout_seconds
                 if webrtc_ice_timeout_seconds is not None
-                else _env_float("RECORD_WEBRTC_ICE_TIMEOUT_SECONDS", 15.0)
+                else perception_settings.webrtc_ice_timeout_seconds
             ),
         )
 
@@ -210,11 +222,15 @@ class RecordingManager:
         async with self._lock:
             return replace(self._status)
 
-    def _resolve_backend_default(self, explicit_backend_default: Optional[str]) -> str:
+    def _resolve_backend_default(
+        self,
+        explicit_backend_default: Optional[str],
+        configured_default: str,
+    ) -> str:
         if explicit_backend_default:
             value = explicit_backend_default.strip().lower()
         else:
-            value = os.getenv("RECORD_BACKEND_DEFAULT", "hybrid").strip().lower()
+            value = configured_default.strip().lower()
 
         if value not in {"hybrid", "webrtc", "timelapse"}:
             return "hybrid"
@@ -622,35 +638,3 @@ class RecordingManager:
         if hostname and token:
             return str(hostname), str(token)
         return None
-
-
-def _env_var_is_true(name: str, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    normalized = value.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    return default
-
-
-def _env_int(name: str, default: int) -> int:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        return int(value.strip())
-    except Exception:
-        return default
-
-
-def _env_float(name: str, default: float) -> float:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        return float(value.strip())
-    except Exception:
-        return default

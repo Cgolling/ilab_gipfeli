@@ -23,6 +23,7 @@ from telegram import ForceReply, Update, InlineKeyboardButton, InlineKeyboardMar
 from telegram.error import BadRequest, NetworkError
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
+from src.app_settings import load_app_settings
 from src.perception import RecordingManager, RecordingState, SnapshotManager
 from src.spot import SpotController
 from src.spot.spot_controller import WAYPOINTS
@@ -50,18 +51,14 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 # Configuration constants
-DEFAULT_SPOT_HOSTNAME = "192.168.80.3"
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-DEFAULT_MAP_PATH = os.path.join(PROJECT_ROOT, "maps/map_catacombs_01")
+APP_SETTINGS = load_app_settings()
 CALLBACK_DATA_PREFIX = "goto_"
 SOUND_CALLBACK_DATA_PREFIX = "sound_"
-SOUNDS_DIR = os.path.join(PROJECT_ROOT, "sounds")
-SNAPSHOTS_DIR = os.path.join(PROJECT_ROOT, "logs", "perception_snapshots")
-RECORDINGS_DIR = os.path.join(PROJECT_ROOT, "logs", "perception_recordings")
-SPOT_AUTO_CONNECT_ENV = "SPOT_AUTO_CONNECT"
-RBAC_ENABLED_ENV = "TELEGRAM_RBAC_ENABLED"
-RBAC_CONFIG_PATH_ENV = "TELEGRAM_RBAC_CONFIG_PATH"
-DEFAULT_RBAC_CONFIG_PATH = os.path.join(PROJECT_ROOT, "config", "telegram_rbac.yml")
+DEFAULT_SPOT_HOSTNAME = APP_SETTINGS.telegram.spot_hostname
+DEFAULT_MAP_PATH = APP_SETTINGS.telegram.default_map_path
+SOUNDS_DIR = APP_SETTINGS.telegram.sounds_dir
+SNAPSHOTS_DIR = APP_SETTINGS.telegram.snapshots_dir
+RECORDINGS_DIR = APP_SETTINGS.telegram.recordings_dir
 
 # Global SPOT controller instance
 # Thread-safety note: python-telegram-bot uses a single-threaded async model,
@@ -109,14 +106,17 @@ def initialize_rbac() -> None:
     """
     global rbac_enabled, rbac_config
 
-    rbac_enabled = env_var_is_true(RBAC_ENABLED_ENV, default=True)
+    rbac_enabled = APP_SETTINGS.telegram.rbac_enabled
     rbac_config = None
 
     if not rbac_enabled:
-        logger.warning("RBAC disabled via %s=false", RBAC_ENABLED_ENV)
+        logger.warning(
+            "RBAC disabled via app settings (%s)",
+            APP_SETTINGS.config_path,
+        )
         return
 
-    config_path = os.getenv(RBAC_CONFIG_PATH_ENV, DEFAULT_RBAC_CONFIG_PATH)
+    config_path = APP_SETTINGS.telegram.rbac_config_path
     try:
         rbac_config = load_rbac_config(config_path)
     except Exception as e:
@@ -466,7 +466,7 @@ async def connect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not update.message:
         return
 
-    hostname = os.getenv("SPOT_HOSTNAME", DEFAULT_SPOT_HOSTNAME)
+    hostname = DEFAULT_SPOT_HOSTNAME
     map_path = DEFAULT_MAP_PATH
 
     logger.info(f"User initiated /connect to SPOT at {hostname}")
@@ -498,7 +498,7 @@ async def forceconnect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not update.message:
         return
 
-    hostname = os.getenv("SPOT_HOSTNAME", DEFAULT_SPOT_HOSTNAME)
+    hostname = DEFAULT_SPOT_HOSTNAME
     map_path = DEFAULT_MAP_PATH
 
     logger.warning(f"User initiated /forceconnect to SPOT at {hostname}")
@@ -1130,14 +1130,15 @@ async def post_init(application: Application) -> None:
     """Try to connect to SPOT once on startup."""
     global spot_controller
 
-    if not env_var_is_true(SPOT_AUTO_CONNECT_ENV, default=True):
+    if not APP_SETTINGS.telegram.spot_auto_connect:
         logger.info(
-            "SPOT auto-connect disabled via %s=false. Telegram bot running in Telegram-only mode.",
-            SPOT_AUTO_CONNECT_ENV,
+            "SPOT auto-connect disabled via app settings (%s). "
+            "Telegram bot running in Telegram-only mode.",
+            APP_SETTINGS.config_path,
         )
         return
 
-    hostname = os.getenv("SPOT_HOSTNAME", DEFAULT_SPOT_HOSTNAME)
+    hostname = DEFAULT_SPOT_HOSTNAME
     map_path = DEFAULT_MAP_PATH
 
     logger.info(f"Attempting auto-connect to SPOT at {hostname}...")
