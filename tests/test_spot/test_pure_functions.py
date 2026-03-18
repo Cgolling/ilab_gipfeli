@@ -120,20 +120,36 @@ class TestResolveAnnotationOrRawId:
     def test_annotation_name_resolves_to_id(self):
         """Annotation names in mapping resolve to waypoint ID."""
         name_to_id = {"aula": "aula-full-waypoint-id"}
-        result = _resolve_annotation_or_raw_id("aula", name_to_id)
+        graph = MagicMock()
+        graph.waypoints = []
+        result = _resolve_annotation_or_raw_id("aula", graph, name_to_id)
         assert result == "aula-full-waypoint-id"
 
     def test_ambiguous_annotation_returns_none(self):
         """Ambiguous annotations (None value) return None."""
         name_to_id = {"duplicate": None}  # None indicates ambiguity
-        result = _resolve_annotation_or_raw_id("duplicate", name_to_id)
+        graph = MagicMock()
+        graph.waypoints = []
+        result = _resolve_annotation_or_raw_id("duplicate", graph, name_to_id)
         assert result is None
 
-    def test_unknown_identifier_returned_as_raw_id(self):
-        """Unknown identifiers are assumed to be raw IDs."""
+    def test_full_waypoint_id_is_returned(self):
+        """Known full waypoint IDs should be returned directly."""
         name_to_id = {"known": "known-id"}
-        result = _resolve_annotation_or_raw_id("raw-waypoint-id", name_to_id)
+        graph = MagicMock()
+        waypoint = MagicMock()
+        waypoint.id = "raw-waypoint-id"
+        graph.waypoints = [waypoint]
+        result = _resolve_annotation_or_raw_id("raw-waypoint-id", graph, name_to_id)
         assert result == "raw-waypoint-id"
+
+    def test_unknown_identifier_returns_none(self):
+        """Unknown identifiers should fail instead of being passed through."""
+        name_to_id = {"known": "known-id"}
+        graph = MagicMock()
+        graph.waypoints = []
+        result = _resolve_annotation_or_raw_id("missing", graph, name_to_id)
+        assert result is None
 
 
 class TestUpdateWaypointsAndEdges:

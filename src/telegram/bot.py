@@ -11,6 +11,7 @@ via Telegram, including navigation to predefined waypoints.
 
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 from typing import Optional
@@ -24,9 +25,10 @@ from telegram.error import BadRequest, NetworkError
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
 from src.app_settings import load_app_settings
+from src.map_store import MapStore
 from src.perception import RecordingManager, RecordingState, SnapshotManager
 from src.spot import SpotController
-from src.spot.spot_controller import WAYPOINTS
+from src.spot.spot_controller import MapRecordingStatus, WAYPOINTS
 from src.logging_config import setup_logging
 from src.tasks import (
     GIPFELI_PICKUP_WAYPOINT,
@@ -59,6 +61,7 @@ DEFAULT_MAP_PATH = APP_SETTINGS.telegram.default_map_path
 SOUNDS_DIR = APP_SETTINGS.telegram.sounds_dir
 SNAPSHOTS_DIR = APP_SETTINGS.telegram.snapshots_dir
 RECORDINGS_DIR = APP_SETTINGS.telegram.recordings_dir
+map_store = MapStore(DEFAULT_MAP_PATH)
 
 # Global SPOT controller instance
 # Thread-safety note: python-telegram-bot uses a single-threaded async model,
@@ -82,6 +85,51 @@ recording_manager = RecordingManager(
     lambda: spot_controller,
     output_dir=RECORDINGS_DIR,
 )
+
+
+def get_active_map_info():
+    """Return current active map metadata from local map store."""
+    return map_store.get_active_map()
+
+
+def get_active_map_path() -> str:
+    """Return active map path, falling back to configured default map."""
+    active_map = get_active_map_info()
+    if active_map is not None:
+        return active_map.path
+    return DEFAULT_MAP_PATH
+
+
+def get_navigation_waypoints() -> list[str]:
+    """Return curated waypoint names for the active map only."""
+    return map_store.list_active_waypoints()
+
+
+def resolve_navigation_destination(name: str) -> str | None:
+    """Resolve a user-facing waypoint name to the configured GraphNav identifier."""
+    return map_store.resolve_active_waypoint(name)
+
+
+def build_goto_keyboard(destinations: list[str], limit: int = 4) -> InlineKeyboardMarkup:
+    """Build a compact 2-column keyboard for the first few destinations."""
+    keyboard: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+
+    for index, destination in enumerate(destinations[:limit], start=1):
+        row.append(
+            InlineKeyboardButton(
+                destination.replace("_", " ").title(),
+                callback_data=f"{CALLBACK_DATA_PREFIX}{destination}",
+            )
+        )
+        if index % 2 == 0:
+            keyboard.append(row)
+            row = []
+
+    if row:
+        keyboard.append(row)
+
+    return InlineKeyboardMarkup(keyboard)
 
 
 def env_var_is_true(name: str, default: bool = True) -> bool:
@@ -292,6 +340,53 @@ def task_usage() -> str:
     )
 
 
+def map_usage() -> str:
+    """Usage text for /map command."""
+    return (
+        "Map command usage:\n"
+        "/map list - Show available stored maps\n"
+        "/map active - Show active map\n"
+        "/map waypoints - Show named waypoints of the active map\n"
+        "/map load <map_name> - Activate a map and upload it if SPOT is connected\n"
+        "/map waypoint <name> - Create a named waypoint during recording\n"
+        "/map record - Show recording commands"
+    )
+
+
+def map_record_usage() -> str:
+    """Usage text for /map record commands."""
+    return (
+        "Map recording usage:\n"
+        "/map record start <map_name> - Start a new map recording\n"
+        "/map record status - Show recording state\n"
+        "/map record stop - Stop recording but keep graph on robot\n"
+        "/map record abort - Abort recording and discard current graph\n"
+        "/map record close-loops [all|fiducial|odometry] - Add loop-closure edges\n"
+        "/map record optimize - Optimize anchoring\n"
+        "/map record save [map_name] - Save current graph into maps/\n\n"
+        "During recording, create named waypoints with:\n"
+        "/map waypoint <name>"
+    )
+
+
+def format_map_recording_status(status: MapRecordingStatus) -> str:
+    """Build human-readable GraphNav recording status text."""
+    lines = [
+        "Map recording status:",
+        f"State: {status.state}",
+        f"Recording: {'yes' if status.is_recording else 'no'}",
+        f"Session name: {status.session_name or '-'}",
+        f"Unsaved graph: {'yes' if status.has_unsaved_graph else 'no'}",
+        f"Waypoints: {status.waypoint_count}",
+        f"Edges: {status.edge_count}",
+        f"Last saved map: {status.last_saved_map_name or '-'}",
+        f"Updated: {status.updated_at.strftime('%Y-%m-%d %H:%M:%S UTC')}",
+    ]
+    if status.last_error:
+        lines.append(f"Last error: {status.last_error}")
+    return "\n".join(lines)
+
+
 def snapshot_usage() -> str:
     """Usage text for snapshot command."""
     return (
@@ -395,7 +490,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/forceconnect - Force take control (use if stuck!)\n"
         "/status - Show robot status\n\n"
         "Navigation:\n"
-        "/goto - Navigate to a location\n\n"
+        "/map - Map selection, recording, and waypoints\n"
+        "/goto - Navigate to a named waypoint\n\n"
         "Audio:\n"
         "/sound - Play a WAV sound from sounds/ (optional gain)\n\n"
         "/volume - Get/set Spot CAM volume (0-100)\n\n"
@@ -467,7 +563,7 @@ async def connect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     hostname = DEFAULT_SPOT_HOSTNAME
-    map_path = DEFAULT_MAP_PATH
+    map_path = get_active_map_path()
 
     logger.info(f"User initiated /connect to SPOT at {hostname}")
     await update.message.reply_text("Starting SPOT connection procedure...")
@@ -483,7 +579,11 @@ async def connect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     if success:
         logger.info("SPOT connection successful via /connect command")
-        await update.message.reply_text("SPOT is ready! Use /goto to navigate.")
+        active_map = get_active_map_info()
+        active_map_name = active_map.name if active_map is not None else Path(map_path).name
+        await update.message.reply_text(
+            f"SPOT is ready! Active map: {active_map_name}\nUse /goto to navigate."
+        )
     else:
         logger.warning("SPOT connection failed via /connect command")
 
@@ -499,7 +599,7 @@ async def forceconnect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     hostname = DEFAULT_SPOT_HOSTNAME
-    map_path = DEFAULT_MAP_PATH
+    map_path = get_active_map_path()
 
     logger.warning(f"User initiated /forceconnect to SPOT at {hostname}")
     await update.message.reply_text(
@@ -620,25 +720,275 @@ async def status_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(f"Error getting status: {e}")
 
 
+async def map_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show available maps, active map, recording status, or switch active map."""
+    global spot_controller
+
+    if not await authorize(update, "map"):
+        return
+
+    if not update.message:
+        return
+
+    raw_args = getattr(context, "args", [])
+    args = raw_args if isinstance(raw_args, list) else []
+    args = [arg.strip() for arg in args if arg and arg.strip()]
+
+    if not args:
+        await update.message.reply_text(map_usage())
+        return
+
+    command = args[0].lower()
+
+    if command == "list":
+        maps = map_store.list_maps()
+        active_map = get_active_map_info()
+        if not maps:
+            await update.message.reply_text("No stored GraphNav maps found.")
+            return
+
+        lines = ["Available maps:"]
+        for map_info in maps:
+            marker = " (active)" if active_map and map_info.name == active_map.name else ""
+            lines.append(
+                f"- {map_info.name}{marker}: {len(map_info.named_waypoints)} named waypoints"
+            )
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    if command == "active":
+        active_map = get_active_map_info()
+        if active_map is None:
+            await update.message.reply_text("No active map configured.")
+            return
+
+        await update.message.reply_text(
+            "Active map:\n"
+            f"Name: {active_map.name}\n"
+            f"Path: {active_map.path}\n"
+            f"Named waypoints: {len(active_map.named_waypoints)}"
+        )
+        return
+
+    if command == "waypoints":
+        active_map = get_active_map_info()
+        if active_map is None:
+            await update.message.reply_text("No active map configured.")
+            return
+
+        if not active_map.named_waypoints:
+            await update.message.reply_text(
+                f"Map '{active_map.name}' has no configured named waypoints yet."
+            )
+            return
+
+        await update.message.reply_text(
+            f"Named waypoints in '{active_map.name}':\n"
+            + "\n".join(f"- {name}" for name in sorted(active_map.named_waypoints.keys()))
+        )
+        return
+
+    if command == "waypoint":
+        if not await authorize_operator(update):
+            return
+        if len(args) < 2:
+            await update.message.reply_text(map_record_usage())
+            return
+        if spot_controller is None:
+            await update.message.reply_text("SPOT not connected. Use /connect first.")
+            return
+
+        waypoint_name = " ".join(args[1:]).strip()
+
+        async def send_status(msg: str) -> None:
+            if update.message:
+                await update.message.reply_text(msg)
+
+        await spot_controller.create_recording_waypoint(waypoint_name, send_status)
+        return
+
+    if command == "record":
+        if len(args) == 1:
+            await update.message.reply_text(map_record_usage())
+            return
+
+        action = args[1].lower()
+        if action == "status":
+            if spot_controller is None:
+                await update.message.reply_text(
+                    format_map_recording_status(
+                        MapRecordingStatus(
+                            session_name=None,
+                            state="idle",
+                            is_recording=False,
+                            has_unsaved_graph=False,
+                            waypoint_count=0,
+                            edge_count=0,
+                            last_saved_map_name=None,
+                            last_error=None,
+                            updated_at=datetime.now(timezone.utc),
+                        )
+                    )
+                )
+                return
+            await update.message.reply_text(
+                format_map_recording_status(spot_controller.get_recording_status())
+            )
+            return
+
+        if not await authorize_operator(update):
+            return
+        if spot_controller is None:
+            await update.message.reply_text("SPOT not connected. Use /connect first.")
+            return
+
+        async def send_status(msg: str) -> None:
+            if update.message:
+                await update.message.reply_text(msg)
+
+        if action == "start":
+            if len(args) < 3:
+                await update.message.reply_text(map_record_usage())
+                return
+            map_name = " ".join(args[2:]).strip()
+            await spot_controller.start_map_recording(map_name, send_status)
+            return
+
+        if action == "stop":
+            await spot_controller.stop_map_recording(send_status)
+            return
+
+        if action == "abort":
+            await spot_controller.abort_map_recording(send_status)
+            return
+
+        if action == "close-loops":
+            mode = args[2].lower() if len(args) > 2 else "all"
+            await spot_controller.close_recording_loops(mode, send_status)
+            return
+
+        if action == "optimize":
+            await spot_controller.optimize_recording_anchoring(send_status)
+            return
+
+        if action == "save":
+            requested_name = " ".join(args[2:]).strip() if len(args) > 2 else None
+            ok, saved_path = await spot_controller.save_recorded_map(requested_name, send_status)
+            if ok and saved_path:
+                saved_map = map_store.set_active_map(Path(saved_path).name)
+                await update.message.reply_text(
+                    f"Map '{saved_map.name}' is now active and available via /goto."
+                )
+            return
+
+        await update.message.reply_text(map_record_usage())
+        return
+
+    if command == "load":
+        if not await authorize_operator(update):
+            return
+
+        if len(args) < 2:
+            await update.message.reply_text(map_usage())
+            return
+
+        requested_name = " ".join(args[1:]).strip()
+        try:
+            selected_map = map_store.set_active_map(requested_name)
+        except ValueError:
+            available = ", ".join(map_info.name for map_info in map_store.list_maps())
+            await update.message.reply_text(
+                f"Unknown map '{requested_name}'.\n"
+                f"Available maps: {available}"
+            )
+            return
+
+        if spot_controller is not None and spot_controller.is_connected:
+            async def send_status(msg: str) -> None:
+                if update.message:
+                    await update.message.reply_text(msg)
+
+            ok = await spot_controller.load_map(selected_map.path, send_status)
+            if ok:
+                await update.message.reply_text(
+                    f"Map '{selected_map.name}' is now active."
+                )
+            return
+
+        if spot_controller is not None:
+            spot_controller.set_map_path(selected_map.path)
+
+        await update.message.reply_text(
+            f"Map '{selected_map.name}' is now active and will be used on the next /connect."
+        )
+        return
+
+    await update.message.reply_text(map_usage())
+
+
+async def _navigate_from_message(
+    destination: str,
+    reply_target,
+) -> None:
+    """Run navigation from a message context and stream status updates."""
+    if spot_controller is None or not spot_controller.is_connected:
+        await reply_target.reply_text("SPOT not connected. Use /connect first.")
+        return
+
+    resolved_destination = resolve_navigation_destination(destination)
+    if resolved_destination is None:
+        active_map = get_active_map_info()
+        active_map_name = active_map.name if active_map is not None else Path(get_active_map_path()).name
+        await reply_target.reply_text(
+            f"'{destination}' is not a configured named waypoint for '{active_map_name}'.\n"
+            "Use /map waypoints to see the curated waypoint list."
+        )
+        return
+
+    async def send_status(msg: str) -> None:
+        await reply_target.reply_text(msg)
+
+    logger.info("User requested navigation to: %s", destination)
+    success = await spot_controller.navigate_to(resolved_destination, send_status)
+    if success:
+        await reply_target.reply_text(f"Arrived at {destination}!")
+    else:
+        await reply_target.reply_text(f"Failed to navigate to {destination}")
+
+
 async def goto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send inline keyboard with location options."""
+    """Navigate directly or show waypoint buttons for the active map."""
     if not await authorize(update, "goto"):
         return
 
     if not update.message:
         return
-    keyboard = [
-        [
-            InlineKeyboardButton("Aula", callback_data=f"{CALLBACK_DATA_PREFIX}aula"),
-            InlineKeyboardButton("Triangle", callback_data=f"{CALLBACK_DATA_PREFIX}triangle"),
-        ],
-        [
-            InlineKeyboardButton("Hauswart", callback_data=f"{CALLBACK_DATA_PREFIX}hauswart"),
-            InlineKeyboardButton("Turnhalle", callback_data=f"{CALLBACK_DATA_PREFIX}turnhalle"),
-        ],
+
+    raw_args = getattr(context, "args", [])
+    args = raw_args if isinstance(raw_args, list) else []
+    args = [arg.strip() for arg in args if arg and arg.strip()]
+
+    if args:
+        await _navigate_from_message(" ".join(args), update.message)
+        return
+
+    destinations = get_navigation_waypoints()
+    active_map = get_active_map_info()
+    active_map_name = active_map.name if active_map is not None else Path(get_active_map_path()).name
+
+    if not destinations:
+        await update.message.reply_text(
+            f"Active map: {active_map_name}\nNo configured named waypoints yet.\nAdd them in `config/map_waypoints.yml` and use /map waypoints."
+        )
+        return
+
+    reply_markup = build_goto_keyboard(destinations)
+    lines = [
+        f"Where should SPOT go? Active map: {active_map_name}",
+        "Named waypoints:",
+        *[f"- {destination}" for destination in destinations],
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Where do you want to go?", reply_markup=reply_markup)
+    await update.message.reply_text("\n".join(lines), reply_markup=reply_markup)
 
 
 async def goto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -655,7 +1005,7 @@ async def goto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not query.data:
         return
 
-    location = query.data.replace(CALLBACK_DATA_PREFIX, "")
+    location = query.data.replace(CALLBACK_DATA_PREFIX, "", 1)
 
     # Check if SPOT is connected
     if spot_controller is None or not spot_controller.is_connected:
@@ -678,10 +1028,10 @@ async def goto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if success:
         logger.info(f"Navigation to {location} completed successfully")
-        await query.edit_message_text(f"Arrived at {location.title()}!")
+        await query.edit_message_text(f"Arrived at {location}!")
     else:
         logger.warning(f"Navigation to {location} failed")
-        await query.edit_message_text(f"Failed to navigate to {location.title()}")
+        await query.edit_message_text(f"Failed to navigate to {location}")
 
 
 async def sound(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1117,6 +1467,7 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "/id - Show your Telegram ID\n"
         "/help - Get help\n"
         "/connect - Connect to SPOT robot\n"
+        "/map - Show maps and waypoints\n"
         "/goto - Go to a location\n"
         "/sound - Play a sound\n"
         "/volume - Get/set volume\n"
@@ -1139,7 +1490,7 @@ async def post_init(application: Application) -> None:
         return
 
     hostname = DEFAULT_SPOT_HOSTNAME
-    map_path = DEFAULT_MAP_PATH
+    map_path = get_active_map_path()
 
     logger.info(f"Attempting auto-connect to SPOT at {hostname}...")
     spot_controller = SpotController(hostname, map_path)
@@ -1221,6 +1572,7 @@ def main() -> None:
     application.add_handler(CommandHandler("forceconnect", forceconnect_spot))
     application.add_handler(CommandHandler("disconnect", disconnect_spot))
     application.add_handler(CommandHandler("status", status_spot))
+    application.add_handler(CommandHandler("map", map_command))
 
     # Navigation commands
     application.add_handler(CommandHandler("goto", goto))

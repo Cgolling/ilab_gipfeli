@@ -20,6 +20,7 @@ from src.telegram.bot import (
     id_command,
     help_command,
     forceconnect_spot,
+    map_command,
     goto,
     goto_callback,
     sound,
@@ -84,6 +85,7 @@ class TestHelpCommand:
         assert "/id" in help_text
         assert "/help" in help_text
         assert "/connect" in help_text
+        assert "/map" in help_text
         assert "/goto" in help_text
         assert "/sound" in help_text
         assert "/volume" in help_text
@@ -138,11 +140,16 @@ class TestGotoCommand:
     """Tests for /goto command."""
 
     @pytest.mark.asyncio
-    async def test_goto_shows_location_buttons(
+    async def test_goto_shows_waypoint_buttons(
         self, mock_telegram_update, mock_telegram_context
     ):
-        """Goto command presents inline keyboard with locations."""
-        await goto(mock_telegram_update, mock_telegram_context)
+        """Goto command presents inline keyboard with active map waypoints."""
+        mock_telegram_context.args = []
+        with patch(
+            "src.telegram.bot.get_navigation_waypoints",
+            return_value=["aula", "triangle", "hauswart", "turnhalle"],
+        ), patch("src.telegram.bot.get_active_map_info", return_value=MagicMock(name="map_catacombs_01")):
+            await goto(mock_telegram_update, mock_telegram_context)
 
         mock_telegram_update.message.reply_text.assert_called_once()
 
@@ -167,7 +174,12 @@ class TestGotoCommand:
         self, mock_telegram_update, mock_telegram_context
     ):
         """Buttons have callback data with correct prefix."""
-        await goto(mock_telegram_update, mock_telegram_context)
+        mock_telegram_context.args = []
+        with patch(
+            "src.telegram.bot.get_navigation_waypoints",
+            return_value=["aula", "triangle"],
+        ), patch("src.telegram.bot.get_active_map_info", return_value=None):
+            await goto(mock_telegram_update, mock_telegram_context)
 
         call_kwargs = mock_telegram_update.message.reply_text.call_args[1]
         reply_markup = call_kwargs["reply_markup"]
@@ -182,10 +194,68 @@ class TestGotoCommand:
         self, mock_telegram_update, mock_telegram_context
     ):
         """Goto command asks user for destination."""
-        await goto(mock_telegram_update, mock_telegram_context)
+        mock_telegram_context.args = []
+        with patch(
+            "src.telegram.bot.get_navigation_waypoints",
+            return_value=["aula", "triangle"],
+        ), patch("src.telegram.bot.get_active_map_info", return_value=None):
+            await goto(mock_telegram_update, mock_telegram_context)
 
         message_text = mock_telegram_update.message.reply_text.call_args[0][0]
         assert "where" in message_text.lower() or "go" in message_text.lower()
+
+    @pytest.mark.asyncio
+    async def test_goto_with_argument_navigates_directly(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        """Direct destination arguments should skip button rendering."""
+        mock_telegram_context.args = ["triangle"]
+        mock_controller = MagicMock()
+        mock_controller.is_connected = True
+        mock_controller.navigate_to = AsyncMock(return_value=True)
+
+        with patch("src.telegram.bot.spot_controller", mock_controller), patch(
+            "src.telegram.bot.resolve_navigation_destination", return_value="triangle"
+        ):
+            await goto(mock_telegram_update, mock_telegram_context)
+
+        mock_controller.navigate_to.assert_called_once()
+        reply_texts = [call[0][0] for call in mock_telegram_update.message.reply_text.call_args_list]
+        assert any("Arrived at triangle!" == text for text in reply_texts)
+
+    @pytest.mark.asyncio
+    async def test_goto_without_configured_waypoints_shows_hint(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        mock_telegram_context.args = []
+        active_map = MagicMock()
+        active_map.name = "map_hallway_room_9"
+
+        with patch(
+            "src.telegram.bot.get_navigation_waypoints",
+            return_value=[],
+        ), patch("src.telegram.bot.get_active_map_info", return_value=active_map):
+            await goto(mock_telegram_update, mock_telegram_context)
+
+        reply = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "No configured named waypoints yet" in reply
+
+    @pytest.mark.asyncio
+    async def test_goto_with_unknown_curated_name_is_rejected(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        mock_telegram_context.args = ["mystery"]
+        mock_controller = MagicMock()
+        mock_controller.is_connected = True
+
+        with patch("src.telegram.bot.spot_controller", mock_controller), patch(
+            "src.telegram.bot.resolve_navigation_destination", return_value=None
+        ), patch("src.telegram.bot.get_active_map_info", return_value=MagicMock(name="map_catacombs_01")):
+            await goto(mock_telegram_update, mock_telegram_context)
+
+        mock_controller.navigate_to.assert_not_called()
+        reply = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "not a configured named waypoint" in reply
 
 
 class TestGotoCallback:
@@ -298,6 +368,163 @@ class TestGotoCallback:
 
         final_msg = mock_callback_query.edit_message_text.call_args[0][0]
         assert "Failed" in final_msg or "failed" in final_msg.lower()
+
+
+class TestMapCommand:
+    """Tests for /map command."""
+
+    @pytest.mark.asyncio
+    async def test_map_without_args_shows_usage(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        mock_telegram_context.args = []
+
+        await map_command(mock_telegram_update, mock_telegram_context)
+
+        reply = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "Map command usage" in reply
+        assert "/map list" in reply
+        assert "/map record" in reply
+
+    @pytest.mark.asyncio
+    async def test_map_list_shows_maps(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        mock_telegram_context.args = ["list"]
+        map_info = MagicMock()
+        map_info.name = "map_catacombs_01"
+        map_info.named_waypoints = {"aula": "aula", "triangle": "triangle"}
+
+        store = MagicMock()
+        store.list_maps.return_value = [map_info]
+
+        with patch("src.telegram.bot.map_store", store), patch(
+            "src.telegram.bot.get_active_map_info", return_value=map_info
+        ):
+            await map_command(mock_telegram_update, mock_telegram_context)
+
+        reply = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "map_catacombs_01" in reply
+        assert "active" in reply.lower()
+
+    @pytest.mark.asyncio
+    async def test_map_load_sets_active_map_for_next_connect(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        mock_telegram_context.args = ["load", "map_hallway_room_9"]
+        selected_map = MagicMock()
+        selected_map.name = "map_hallway_room_9"
+        selected_map.path = "maps/map_hallway_room_9"
+        store = MagicMock()
+        store.set_active_map.return_value = selected_map
+
+        with patch("src.telegram.bot.map_store", store), patch(
+            "src.telegram.bot.spot_controller", None
+        ):
+            await map_command(mock_telegram_update, mock_telegram_context)
+
+        store.set_active_map.assert_called_once_with("map_hallway_room_9")
+        reply = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "will be used on the next /connect" in reply
+
+    @pytest.mark.asyncio
+    async def test_map_record_without_action_shows_record_usage(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        mock_telegram_context.args = ["record"]
+
+        await map_command(mock_telegram_update, mock_telegram_context)
+
+        reply = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "Map recording usage" in reply
+        assert "/map record start" in reply
+        assert "/map record abort" in reply
+
+    @pytest.mark.asyncio
+    async def test_map_record_status_uses_controller_status(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        mock_telegram_context.args = ["record", "status"]
+        controller = MagicMock()
+        controller.get_recording_status.return_value = MagicMock(
+            state="recording",
+            is_recording=True,
+            session_name="hallway_room_9",
+            has_unsaved_graph=True,
+            waypoint_count=4,
+            edge_count=3,
+            last_saved_map_name=None,
+            last_error=None,
+            updated_at=MagicMock(strftime=MagicMock(return_value="2026-03-18 12:00:00 UTC")),
+        )
+
+        with patch("src.telegram.bot.spot_controller", controller):
+            await map_command(mock_telegram_update, mock_telegram_context)
+
+        reply = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "Map recording status" in reply
+        assert "hallway_room_9" in reply
+
+    @pytest.mark.asyncio
+    async def test_map_waypoint_calls_controller(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        mock_telegram_context.args = ["waypoint", "zimmer_9"]
+        controller = MagicMock()
+        controller.create_recording_waypoint = AsyncMock(return_value=True)
+
+        with patch("src.telegram.bot.spot_controller", controller):
+            await map_command(mock_telegram_update, mock_telegram_context)
+
+        controller.create_recording_waypoint.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_map_record_start_calls_controller(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        mock_telegram_context.args = ["record", "start", "hallway_room_9"]
+        controller = MagicMock()
+        controller.start_map_recording = AsyncMock(return_value=True)
+
+        with patch("src.telegram.bot.spot_controller", controller):
+            await map_command(mock_telegram_update, mock_telegram_context)
+
+        controller.start_map_recording.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_map_record_save_sets_active_map(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        mock_telegram_context.args = ["record", "save", "hallway_room_9"]
+        controller = MagicMock()
+        controller.save_recorded_map = AsyncMock(
+            return_value=(True, "C:/repo/maps/hallway_room_9")
+        )
+        saved_map = MagicMock()
+        saved_map.name = "hallway_room_9"
+        store = MagicMock()
+        store.set_active_map.return_value = saved_map
+
+        with patch("src.telegram.bot.spot_controller", controller), patch(
+            "src.telegram.bot.map_store", store
+        ):
+            await map_command(mock_telegram_update, mock_telegram_context)
+
+        controller.save_recorded_map.assert_called_once()
+        store.set_active_map.assert_called_once_with("hallway_room_9")
+
+    @pytest.mark.asyncio
+    async def test_map_record_abort_calls_controller(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        mock_telegram_context.args = ["record", "abort"]
+        controller = MagicMock()
+        controller.abort_map_recording = AsyncMock(return_value=True)
+
+        with patch("src.telegram.bot.spot_controller", controller):
+            await map_command(mock_telegram_update, mock_telegram_context)
+
+        controller.abort_map_recording.assert_called_once()
 
 
 class TestSoundCommand:

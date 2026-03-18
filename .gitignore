@@ -12,6 +12,7 @@ wheels/
 # Environment variable files
 .env
 config/app_settings.local.yml
+config/map_state.local.yml
 
 # Log files
 logs/

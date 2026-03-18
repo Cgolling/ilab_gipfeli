@@ -1,0 +1,13 @@
+# Curated named waypoints exposed in Telegram.
+# Only entries listed here are shown via /goto and /map waypoints.
+
+maps:
+  map_catacombs_01:
+    named_waypoints:
+      aula: aula
+      triangle: triangle
+      hauswart: hauswart
+      turnhalle: turnhalle
+
+  map_hallway_room_9:
+    named_waypoints: {}

@@ -287,18 +287,52 @@ ilab_gipfeli/
 | `/disconnect` | Verbindung trennen und Lease freigeben |
 | `/forceconnect` | Lease erzwingen (falls blockiert) |
 | `/status` | Roboter-Status anzeigen (Batterie, etc.) |
-| `/goto` | SPOT zu einem Standort navigieren |
-| `/sound` | WAV-Datei über Spot CAM abspielen |
-| `/volume` | Spot CAM Lautstärke lesen/setzen (0-100) |
+| `/map` | Verf?gbare GraphNav-Maps anzeigen / aktive Map wechseln |
+| `/goto` | SPOT zu einem Waypoint der aktiven Map navigieren |
+| `/sound` | WAV-Datei ?ber Spot CAM abspielen |
+| `/volume` | Spot CAM Lautst?rke lesen/setzen (0-100) |
 | `/snapshot` | Kameraquellen anzeigen oder Einzelbild aufnehmen |
 | `/record` | Aufnahme starten/stoppen (WebRTC oder Timelapse) |
 | `/task` | Missions-/Task-Steuerung (z.B. Gipfeli-Lieferung) |
 
-**Verfügbare Standorte für `/goto`:**
-- Aula
-- Triangle
-- Hauswart
-- Turnhalle
+**Maps mit `/map`:**
+- `/map list` zeigt alle gespeicherten Maps im Ordner `maps/`
+- `/map active` zeigt die aktuell aktive Map
+- `/map waypoints` listet die benannten Waypoints der aktiven Map
+- `/map load <map_name>` aktiviert eine andere Map
+- `/map record` zeigt die Recording-Unterbefehle
+- `/map waypoint <name>` erstellt w?hrend einer laufenden Aufnahme einen benannten Waypoint
+
+**Map-Recording mit Telegram:**
+- `/map record start <map_name>` startet eine neue Aufnahme und leert daf?r zuerst die Server-Map auf dem Robot
+- `/map waypoint <name>` speichert den aktuellen Ort als benannten Waypoint in der laufenden Aufnahme
+- `/map record stop` beendet die Aufnahme, l?sst die aufgenommene GraphNav-Map aber noch auf dem Robot
+- `/map record abort` verwirft eine laufende oder ungespeicherte Aufnahme auf dem Robot
+- `/map record close-loops [all|fiducial|odometry]` f?gt zus?tzliche Loop-Closure-Edges hinzu
+- `/map record optimize` optimiert das Anchoring der aufgenommenen Map
+- `/map record save [map_name]` l?dt die aktuelle Robot-Map nach `maps/<map_name>` herunter und setzt sie als aktive Map
+- `/map record status` zeigt Recording-Status, Waypoint-Anzahl, Edge-Anzahl und die letzte gespeicherte Map
+
+**Empfohlener Ablauf:**
+1. `/map record start hallway_room_9`
+2. Roboter f?hren
+3. `/map waypoint ecke_flur`
+4. `/map waypoint zimmer_9`
+5. `/map record stop`
+6. `/map record close-loops`
+7. `/map record optimize`
+8. `/map record save`
+
+**Navigation mit `/goto`:**
+- `/goto` zeigt die benannten Waypoints der aktiven Map
+- Die ersten Ziele werden direkt als Buttons angezeigt
+- `/goto <waypoint_name>` startet die Navigation direkt per Namen
+- Die verf?gbaren Ziele h?ngen von der aktuell aktiven Map ab und werden nicht mehr statisch im Code gepflegt
+
+**Aktive Map speichern:**
+- Die aktive Map wird lokal in `config/map_state.local.yml` gespeichert
+- Diese Datei ist **nicht versioniert** und wird automatisch erstellt, sobald du `/map load ...` nutzt
+- Ohne diese Datei verwendet der Bot den Fallback `telegram.default_map_path` aus `config/app_settings.yml`
 
 **Audio mit `/sound`:**
 - Lege `.wav` Dateien in den Ordner `sounds/`
@@ -349,9 +383,9 @@ Hinweis:
 ## Zugriffskontrolle
 
 Der Bot nutzt rollenbasierte Zugriffskontrolle (RBAC) mit den Rollen:
-- `viewer`: `/start`, `/id`, `/help`, `/status`, `/task status`
-- `operator`: zusätzlich `/connect`, `/disconnect`, `/goto`, `/sound`, `/volume`, `/snapshot`, `/record`, `/task gipfeli ...`, `/task cancel`
-- `admin`: zusätzlich `/forceconnect`
+- `viewer`: `/start`, `/id`, `/help`, `/status`, `/map list`, `/map active`, `/map waypoints`, `/task status`
+- `operator`: zus?tzlich `/connect`, `/disconnect`, `/map load`, `/goto`, `/sound`, `/volume`, `/snapshot`, `/record`, `/task gipfeli ...`, `/task cancel`
+- `admin`: zus?tzlich `/forceconnect`
 
 Konfiguration in `config/telegram_rbac.yml`.
 

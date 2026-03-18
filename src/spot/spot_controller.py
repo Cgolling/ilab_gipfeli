@@ -2,8 +2,10 @@
 
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import logging
 import os
+from pathlib import Path
 import time
 from typing import Awaitable, Callable, Optional
 
@@ -15,17 +17,20 @@ setup_logging()
 import bosdyn.client
 import bosdyn.client.util
 from bosdyn.api import image_pb2, robot_state_pb2
-from bosdyn.api.graph_nav import graph_nav_pb2, map_pb2, nav_pb2
+from bosdyn.api.graph_nav import graph_nav_pb2, map_pb2, map_processing_pb2, nav_pb2, recording_pb2
 from bosdyn.api.spot_cam import audio_pb2
 from bosdyn.client.exceptions import ResponseError
 from bosdyn.client.frame_helpers import get_odom_tform_body
 from bosdyn.client.graph_nav import GraphNavClient
 from bosdyn.client.image import ImageClient, build_image_request
 from bosdyn.client.lease import LeaseClient, LeaseKeepAlive, ResourceAlreadyClaimedError
+from bosdyn.client.map_processing import MapProcessingServiceClient
 from bosdyn.client.power import PowerClient, power_on_motors, safe_power_off_motors
+from bosdyn.client.recording import GraphNavRecordingServiceClient, NotReadyYetError
 from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient
 from bosdyn.client.robot_state import RobotStateClient
 from bosdyn.client.spot_cam.audio import AudioClient
+from google.protobuf import wrappers_pb2 as wrappers
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +56,21 @@ class WebRTCContext:
 
     hostname: str
     token: str
+
+
+@dataclass(frozen=True, slots=True)
+class MapRecordingStatus:
+    """Current/last status of GraphNav map recording."""
+
+    session_name: Optional[str]
+    state: str
+    is_recording: bool
+    has_unsaved_graph: bool
+    waypoint_count: int
+    edge_count: int
+    last_saved_map_name: Optional[str]
+    last_error: Optional[str]
+    updated_at: datetime
 
 
 def id_to_short_code(waypoint_id: str) -> Optional[str]:
@@ -103,10 +123,14 @@ def find_unique_waypoint_id(identifier: str, graph, name_to_id: dict) -> Optiona
         logger.error("Graph not loaded. Cannot find waypoint.")
         return None
 
+    normalized = identifier.strip()
+    if not normalized:
+        return None
+
     # Route to appropriate resolver based on identifier length
-    if len(identifier) == 2:
-        return _resolve_short_code(identifier, graph)
-    return _resolve_annotation_or_raw_id(identifier, name_to_id)
+    if len(normalized) == 2:
+        return _resolve_short_code(normalized, graph)
+    return _resolve_annotation_or_raw_id(normalized, graph, name_to_id)
 
 
 def _resolve_short_code(short_code: str, graph) -> str:
@@ -137,18 +161,19 @@ def _resolve_short_code(short_code: str, graph) -> str:
     return matched_id if matched_id else short_code
 
 
-def _resolve_annotation_or_raw_id(identifier: str, name_to_id: dict) -> Optional[str]:
+def _resolve_annotation_or_raw_id(identifier: str, graph, name_to_id: dict) -> Optional[str]:
     """
     Resolve an annotation name from the mapping, or return as raw ID.
 
     Args:
         identifier: Annotation name or full waypoint ID
+        graph: The loaded GraphNav graph
         name_to_id: Mapping of annotation names to waypoint IDs
 
     Returns:
         The resolved waypoint ID, or None if the annotation is ambiguous.
-        If identifier is not in the mapping, it's assumed to be a raw
-        waypoint ID and returned as-is.
+        If identifier matches a full waypoint ID in the graph, that ID is returned.
+        Unknown identifiers return None.
     """
     if identifier in name_to_id:
         waypoint_id = name_to_id[identifier]
@@ -156,8 +181,13 @@ def _resolve_annotation_or_raw_id(identifier: str, name_to_id: dict) -> Optional
             logger.error(f"Waypoint name '{identifier}' is ambiguous (maps to multiple waypoints).")
             return None
         return waypoint_id
-    # Assume it's already a full waypoint ID
-    return identifier
+
+    for waypoint in graph.waypoints:
+        if waypoint.id == identifier:
+            return identifier
+
+    logger.error("Unknown waypoint identifier '%s'.", identifier)
+    return None
 
 
 def update_waypoints_and_edges(graph, localization_id: str) -> tuple[dict, dict]:
@@ -236,6 +266,8 @@ class SpotController:
         self.power_client = None
         self.audio_client = None
         self.image_client = None
+        self.recording_client = None
+        self.map_processing_client = None
 
         # Graph state
         self._current_graph = None
@@ -256,10 +288,68 @@ class SpotController:
         # Connection state
         self._connected = False
 
+        # Recording state
+        self._recording_session_name: Optional[str] = None
+        self._recording_has_unsaved_graph = False
+        self._recording_last_saved_map_name: Optional[str] = None
+        self._recording_last_error: Optional[str] = None
+
     @property
     def is_connected(self) -> bool:
         """Check if connected to SPOT."""
         return self._connected and self.robot is not None
+
+    @property
+    def current_map_name(self) -> str:
+        """Return the current map directory name."""
+        return os.path.basename(self.map_path.rstrip("/\\"))
+
+    def set_map_path(self, map_path: str) -> None:
+        """Update map path and clear loaded graph state."""
+        self.map_path = map_path.rstrip("/\\")
+        self._clear_loaded_graph_state()
+
+    def get_named_waypoints(self) -> list[str]:
+        """Return unique named waypoints from the currently loaded graph."""
+        names = [
+            name
+            for name, waypoint_id in self._current_annotation_name_to_wp_id.items()
+            if name and waypoint_id
+        ]
+        return sorted(set(names))
+
+    def get_recording_status(self) -> MapRecordingStatus:
+        """Return current/last known GraphNav recording state."""
+        is_recording = False
+        state = "idle"
+
+        if self.is_connected and self.recording_client is not None:
+            try:
+                response = self.recording_client.get_record_status()
+                is_recording = bool(getattr(response, "is_recording", False))
+                state = "recording" if is_recording else (
+                    "stopped" if self._recording_has_unsaved_graph else "idle"
+                )
+            except Exception as exc:
+                self._recording_last_error = str(exc)
+                state = "error"
+
+        if not self.is_connected and self._recording_has_unsaved_graph:
+            state = "stopped"
+
+        waypoint_count = len(self._current_graph.waypoints) if self._current_graph is not None else 0
+        edge_count = len(self._current_graph.edges) if self._current_graph is not None else 0
+        return MapRecordingStatus(
+            session_name=self._recording_session_name,
+            state=state,
+            is_recording=is_recording,
+            has_unsaved_graph=self._recording_has_unsaved_graph,
+            waypoint_count=waypoint_count,
+            edge_count=edge_count,
+            last_saved_map_name=self._recording_last_saved_map_name,
+            last_error=self._recording_last_error,
+            updated_at=datetime.now(timezone.utc),
+        )
 
     def get_status(self) -> dict:
         """
@@ -397,6 +487,437 @@ class SpotController:
             await status_callback(f"Connection failed: {e}")
             return False
 
+    async def load_map(
+        self,
+        map_path: str,
+        status_callback: Callable[[str], Awaitable[None]],
+    ) -> bool:
+        """
+        Switch the active GraphNav map.
+
+        When connected, the new map is uploaded immediately and fiducial localization is retried.
+        When disconnected, the controller just stores the new path for the next /connect.
+        """
+        normalized_path = map_path.rstrip("/\\")
+        graph_path = os.path.join(normalized_path, "graph")
+        if not os.path.isfile(graph_path):
+            await status_callback(f"Map folder is invalid or missing graph file: {normalized_path}")
+            return False
+
+        self.set_map_path(normalized_path)
+
+        if not self.is_connected:
+            await status_callback(f"Active map set to '{self.current_map_name}'. Connect to upload it.")
+            return True
+
+        try:
+            await status_callback(f"Loading map '{self.current_map_name}'...")
+            await asyncio.to_thread(self._upload_graph_and_snapshots)
+            await status_callback("Map uploaded")
+            await status_callback("Relocalizing robot...")
+            await asyncio.to_thread(self._set_initial_localization_fiducial)
+            await status_callback("Robot localized successfully!")
+            return True
+        except Exception as e:
+            logger.exception("Failed to load map '%s': %s", normalized_path, e)
+            await status_callback(f"Failed to load map: {e}")
+            return False
+
+    async def start_map_recording(
+        self,
+        map_name: str,
+        status_callback: Callable[[str], Awaitable[None]],
+    ) -> bool:
+        """Start a fresh GraphNav recording session for a new map."""
+        if not self.is_connected or self.recording_client is None:
+            await status_callback("Not connected to SPOT")
+            return False
+
+        normalized_name = self._normalize_map_name(map_name)
+        if not normalized_name:
+            await status_callback("Invalid map name. Use letters, numbers, '-' or '_'.")
+            return False
+
+        target_dir = self._resolve_map_directory(normalized_name)
+        if target_dir.exists():
+            await status_callback(
+                f"Map '{normalized_name}' already exists locally. Choose a different name."
+            )
+            return False
+
+        try:
+            status = self.get_recording_status()
+            if status.is_recording:
+                await status_callback(
+                    f"A map recording is already running for '{status.session_name or '-'}'."
+                )
+                return False
+
+            await status_callback("Clearing map on robot...")
+            await asyncio.to_thread(self.graph_nav_client.clear_graph)
+
+            await status_callback(f"Starting recording for '{normalized_name}'...")
+            await asyncio.to_thread(
+                self.recording_client.start_recording,
+                recording_environment=self._make_recording_environment(normalized_name),
+            )
+            self._recording_session_name = normalized_name
+            self._recording_has_unsaved_graph = True
+            self._recording_last_error = None
+            self._clear_loaded_graph_state()
+            await status_callback(
+                f"Recording started for '{normalized_name}'. Use /map waypoint <name> to add named waypoints."
+            )
+            return True
+        except Exception as exc:
+            self._recording_last_error = str(exc)
+            logger.exception("Failed to start map recording '%s': %s", normalized_name, exc)
+            await status_callback(f"Failed to start map recording: {exc}")
+            return False
+
+    async def stop_map_recording(
+        self,
+        status_callback: Callable[[str], Awaitable[None]],
+    ) -> bool:
+        """Stop the current recording session but keep it available for save/post-processing."""
+        if not self.is_connected or self.recording_client is None:
+            await status_callback("Not connected to SPOT")
+            return False
+
+        status = self.get_recording_status()
+        if not status.is_recording:
+            await status_callback("No active map recording to stop.")
+            return False
+
+        try:
+            await status_callback("Stopping map recording...")
+            while True:
+                try:
+                    await asyncio.to_thread(self.recording_client.stop_recording)
+                    break
+                except NotReadyYetError:
+                    await asyncio.sleep(1.0)
+
+            await asyncio.to_thread(self._refresh_current_graph_from_robot)
+            self._recording_has_unsaved_graph = True
+            self._recording_last_error = None
+            await status_callback(
+                "Recording stopped. You can now run /map record close-loops, /map record optimize, or /map record save."
+            )
+            return True
+        except Exception as exc:
+            self._recording_last_error = str(exc)
+            logger.exception("Failed to stop map recording: %s", exc)
+            await status_callback(f"Failed to stop map recording: {exc}")
+            return False
+
+    async def abort_map_recording(
+        self,
+        status_callback: Callable[[str], Awaitable[None]],
+    ) -> bool:
+        """Abort the current recording workflow and discard the server-side graph."""
+        if not self.is_connected or self.recording_client is None or self.graph_nav_client is None:
+            await status_callback("Not connected to SPOT")
+            return False
+
+        status = self.get_recording_status()
+        if not status.is_recording and not status.has_unsaved_graph:
+            await status_callback("No active or unsaved map recording to abort.")
+            return False
+
+        try:
+            if status.is_recording:
+                await status_callback("Aborting active map recording...")
+                while True:
+                    try:
+                        await asyncio.to_thread(self.recording_client.stop_recording)
+                        break
+                    except NotReadyYetError:
+                        await asyncio.sleep(1.0)
+
+            await status_callback("Discarding graph on robot...")
+            await asyncio.to_thread(self.graph_nav_client.clear_graph)
+            self._clear_loaded_graph_state()
+            self._recording_session_name = None
+            self._recording_has_unsaved_graph = False
+            self._recording_last_error = None
+            await status_callback("Map recording aborted and discarded.")
+            return True
+        except Exception as exc:
+            self._recording_last_error = str(exc)
+            logger.exception("Failed to abort map recording: %s", exc)
+            await status_callback(f"Failed to abort map recording: {exc}")
+            return False
+
+    async def create_recording_waypoint(
+        self,
+        waypoint_name: str,
+        status_callback: Callable[[str], Awaitable[None]],
+    ) -> bool:
+        """Create a named waypoint at the current robot location during recording."""
+        if not self.is_connected or self.recording_client is None:
+            await status_callback("Not connected to SPOT")
+            return False
+
+        normalized_name = self._normalize_waypoint_name(waypoint_name)
+        if not normalized_name:
+            await status_callback("Invalid waypoint name. Use letters, numbers, '-' or '_'.")
+            return False
+
+        status = self.get_recording_status()
+        if not status.is_recording:
+            await status_callback("No active map recording. Start one with /map record start <map_name>.")
+            return False
+
+        try:
+            response = await asyncio.to_thread(
+                self.recording_client.create_waypoint,
+                waypoint_name=normalized_name,
+            )
+            if response.status != recording_pb2.CreateWaypointResponse.STATUS_OK:
+                await status_callback(f"Could not create waypoint '{normalized_name}'.")
+                return False
+
+            await asyncio.to_thread(self._refresh_current_graph_from_robot)
+            self._recording_has_unsaved_graph = True
+            await status_callback(f"Waypoint '{normalized_name}' created.")
+            return True
+        except Exception as exc:
+            self._recording_last_error = str(exc)
+            logger.exception("Failed to create recording waypoint '%s': %s", normalized_name, exc)
+            await status_callback(f"Failed to create waypoint: {exc}")
+            return False
+
+    async def close_recording_loops(
+        self,
+        mode: str,
+        status_callback: Callable[[str], Awaitable[None]],
+    ) -> bool:
+        """Run GraphNav topology processing to close loops."""
+        if not self.is_connected or self.map_processing_client is None:
+            await status_callback("Not connected to SPOT")
+            return False
+
+        normalized_mode = mode.strip().lower()
+        close_fiducial = normalized_mode in {"all", "fiducial"}
+        close_odometry = normalized_mode in {"all", "odometry"}
+        if normalized_mode not in {"all", "fiducial", "odometry"}:
+            await status_callback("Invalid loop mode. Use: all, fiducial, odometry.")
+            return False
+
+        try:
+            await status_callback(f"Closing {normalized_mode} loops...")
+            response = await asyncio.to_thread(
+                self.map_processing_client.process_topology,
+                map_processing_pb2.ProcessTopologyRequest.Params(
+                    do_fiducial_loop_closure=wrappers.BoolValue(value=close_fiducial),
+                    do_odometry_loop_closure=wrappers.BoolValue(value=close_odometry),
+                ),
+                True,
+            )
+            await asyncio.to_thread(self._refresh_current_graph_from_robot)
+            self._recording_has_unsaved_graph = True
+            await status_callback(f"Loop closure complete. Added {len(response.new_subgraph.edges)} edge(s).")
+            return True
+        except Exception as exc:
+            self._recording_last_error = str(exc)
+            logger.exception("Failed to close loops: %s", exc)
+            await status_callback(f"Failed to close loops: {exc}")
+            return False
+
+    async def optimize_recording_anchoring(
+        self,
+        status_callback: Callable[[str], Awaitable[None]],
+    ) -> bool:
+        """Run GraphNav anchoring optimization on the current server-side map."""
+        if not self.is_connected or self.map_processing_client is None:
+            await status_callback("Not connected to SPOT")
+            return False
+
+        try:
+            await status_callback("Optimizing anchoring...")
+            response = await asyncio.to_thread(
+                self.map_processing_client.process_anchoring,
+                map_processing_pb2.ProcessAnchoringRequest.Params(),
+                True,
+                False,
+            )
+            await asyncio.to_thread(self._refresh_current_graph_from_robot)
+            self._recording_has_unsaved_graph = True
+            await status_callback(
+                f"Anchoring optimized after {response.iteration} iteration(s)."
+            )
+            return True
+        except Exception as exc:
+            self._recording_last_error = str(exc)
+            logger.exception("Failed to optimize anchoring: %s", exc)
+            await status_callback(f"Failed to optimize anchoring: {exc}")
+            return False
+
+    async def save_recorded_map(
+        self,
+        map_name: Optional[str],
+        status_callback: Callable[[str], Awaitable[None]],
+    ) -> tuple[bool, Optional[str]]:
+        """Download the current server-side graph to maps/<name> and switch the active controller map."""
+        if not self.is_connected or self.graph_nav_client is None:
+            await status_callback("Not connected to SPOT")
+            return False, None
+
+        target_name = self._normalize_map_name(map_name or self._recording_session_name or "")
+        if not target_name:
+            await status_callback("No map name available. Start with /map record start <map_name>.")
+            return False, None
+
+        if self.get_recording_status().is_recording:
+            await status_callback("Recording is still running. Stop it first with /map record stop.")
+            return False, None
+
+        target_dir = self._resolve_map_directory(target_name)
+        if target_dir.exists():
+            await status_callback(
+                f"Map '{target_name}' already exists locally. Choose another save name."
+            )
+            return False, None
+
+        try:
+            await status_callback(f"Saving map to '{target_name}'...")
+            await asyncio.to_thread(self._download_graph_to_directory, target_dir)
+            self.set_map_path(str(target_dir))
+            await asyncio.to_thread(self._load_graph_from_disk)
+            self._recording_session_name = target_name
+            self._recording_last_saved_map_name = target_name
+            self._recording_has_unsaved_graph = False
+            self._recording_last_error = None
+            await status_callback(
+                f"Map '{target_name}' saved with {len(self._current_graph.waypoints)} waypoints and {len(self._current_graph.edges)} edges."
+            )
+            return True, str(target_dir)
+        except Exception as exc:
+            self._recording_last_error = str(exc)
+            logger.exception("Failed to save recorded map '%s': %s", target_name, exc)
+            await status_callback(f"Failed to save recorded map: {exc}")
+            return False, None
+
+    def _normalize_map_name(self, map_name: str) -> str:
+        """Normalize a local map directory name."""
+        text = "".join(
+            ch.lower() if ch.isalnum() else "_" if ch in {" ", "-", "_"} else ""
+            for ch in map_name.strip()
+        )
+        while "__" in text:
+            text = text.replace("__", "_")
+        return text.strip("_")
+
+    def _normalize_waypoint_name(self, waypoint_name: str) -> str:
+        """Normalize a waypoint annotation name."""
+        text = "".join(
+            ch.lower() if ch.isalnum() else "_" if ch in {" ", "-", "_"} else ""
+            for ch in waypoint_name.strip()
+        )
+        while "__" in text:
+            text = text.replace("__", "_")
+        return text.strip("_")
+
+    def _resolve_map_directory(self, map_name: str) -> Path:
+        """Return absolute path for a local maps/<map_name> directory."""
+        return Path(self.map_path).resolve().parent / map_name
+
+    def _make_recording_environment(self, map_name: str) -> recording_pb2.RecordingEnvironment:
+        """Build recording environment metadata for a Telegram-driven recording session."""
+        client_metadata = GraphNavRecordingServiceClient.make_client_metadata(
+            session_name=map_name,
+            client_username=os.getenv("USERNAME") or "telegram-bot",
+            client_id="telegram-bot",
+            client_type="telegram",
+        )
+        return GraphNavRecordingServiceClient.make_recording_environment(
+            name=map_name,
+            waypoint_env=GraphNavRecordingServiceClient.make_waypoint_environment(
+                client_metadata=client_metadata
+            ),
+        )
+
+    def _refresh_current_graph_from_robot(self) -> None:
+        """Download graph metadata from the robot and refresh local caches."""
+        assert self.graph_nav_client is not None
+        graph = self.graph_nav_client.download_graph()
+        if graph is None:
+            self._clear_loaded_graph_state()
+            return
+
+        self._current_graph = graph
+        localization_id = self.graph_nav_client.get_localization_state().localization.waypoint_id
+        self._current_annotation_name_to_wp_id, self._current_edges = update_waypoints_and_edges(
+            graph, localization_id
+        )
+
+    def _load_graph_from_disk(self) -> None:
+        """Load graph and snapshots from self.map_path into memory."""
+        logger.info("Loading graph from %s", self.map_path)
+        self._clear_loaded_graph_state()
+
+        graph_path = Path(self.map_path) / "graph"
+        with graph_path.open("rb") as graph_file:
+            self._current_graph = map_pb2.Graph()
+            self._current_graph.ParseFromString(graph_file.read())
+
+        for waypoint in self._current_graph.waypoints:
+            snapshot_path = Path(self.map_path) / "waypoint_snapshots" / waypoint.snapshot_id
+            with snapshot_path.open("rb") as snapshot_file:
+                waypoint_snapshot = map_pb2.WaypointSnapshot()
+                waypoint_snapshot.ParseFromString(snapshot_file.read())
+                self._current_waypoint_snapshots[waypoint_snapshot.id] = waypoint_snapshot
+
+        for edge in self._current_graph.edges:
+            if len(edge.snapshot_id) == 0:
+                continue
+            snapshot_path = Path(self.map_path) / "edge_snapshots" / edge.snapshot_id
+            with snapshot_path.open("rb") as snapshot_file:
+                edge_snapshot = map_pb2.EdgeSnapshot()
+                edge_snapshot.ParseFromString(snapshot_file.read())
+                self._current_edge_snapshots[edge_snapshot.id] = edge_snapshot
+
+        localization_id = ""
+        if self.graph_nav_client is not None:
+            try:
+                localization_id = self.graph_nav_client.get_localization_state().localization.waypoint_id
+            except Exception:
+                localization_id = ""
+
+        self._current_annotation_name_to_wp_id, self._current_edges = update_waypoints_and_edges(
+            self._current_graph, localization_id
+        )
+
+    def _download_graph_to_directory(self, target_dir: Path) -> None:
+        """Download graph and all snapshots from the robot into target_dir."""
+        assert self.graph_nav_client is not None
+
+        graph = self.graph_nav_client.download_graph()
+        if graph is None:
+            raise RuntimeError("Failed to download graph from robot.")
+
+        target_dir.mkdir(parents=True, exist_ok=False)
+        (target_dir / "waypoint_snapshots").mkdir(exist_ok=True)
+        (target_dir / "edge_snapshots").mkdir(exist_ok=True)
+        (target_dir / "graph").write_bytes(graph.SerializeToString())
+
+        for waypoint in graph.waypoints:
+            if not waypoint.snapshot_id:
+                continue
+            snapshot = self.graph_nav_client.download_waypoint_snapshot(waypoint.snapshot_id)
+            (target_dir / "waypoint_snapshots" / waypoint.snapshot_id).write_bytes(
+                snapshot.SerializeToString()
+            )
+
+        for edge in graph.edges:
+            if not edge.snapshot_id:
+                continue
+            snapshot = self.graph_nav_client.download_edge_snapshot(edge.snapshot_id)
+            (target_dir / "edge_snapshots" / edge.snapshot_id).write_bytes(
+                snapshot.SerializeToString()
+            )
+
     def _create_sdk_and_authenticate(self):
         """Create SDK and authenticate with the robot."""
         sdk = bosdyn.client.create_standard_sdk('TelegramSpotClient')
@@ -428,6 +949,10 @@ class SpotController:
             GraphNavClient.default_service_name)
         self.power_client = self.robot.ensure_client(
             PowerClient.default_service_name)
+        self.recording_client = self.robot.ensure_client(
+            GraphNavRecordingServiceClient.default_service_name)
+        self.map_processing_client = self.robot.ensure_client(
+            MapProcessingServiceClient.default_service_name)
         self._initialize_optional_image_client()
         self._initialize_optional_audio_client()
 
@@ -512,35 +1037,12 @@ class SpotController:
 
     def _upload_graph_and_snapshots(self):
         """Upload the graph and snapshots to the robot."""
-        logger.info(f"Loading graph from {self.map_path}")
-
-        # Load graph from disk
-        with open(f'{self.map_path}/graph', 'rb') as graph_file:
-            data = graph_file.read()
-            self._current_graph = map_pb2.Graph()
-            self._current_graph.ParseFromString(data)
-            logger.info(
-                f"Loaded graph has {len(self._current_graph.waypoints)} waypoints "
-                f"and {len(self._current_graph.edges)} edges"
-            )
-
-        # Load waypoint snapshots
-        for waypoint in self._current_graph.waypoints:
-            snapshot_path = f'{self.map_path}/waypoint_snapshots/{waypoint.snapshot_id}'
-            with open(snapshot_path, 'rb') as snapshot_file:
-                waypoint_snapshot = map_pb2.WaypointSnapshot()
-                waypoint_snapshot.ParseFromString(snapshot_file.read())
-                self._current_waypoint_snapshots[waypoint_snapshot.id] = waypoint_snapshot
-
-        # Load edge snapshots
-        for edge in self._current_graph.edges:
-            if len(edge.snapshot_id) == 0:
-                continue
-            snapshot_path = f'{self.map_path}/edge_snapshots/{edge.snapshot_id}'
-            with open(snapshot_path, 'rb') as snapshot_file:
-                edge_snapshot = map_pb2.EdgeSnapshot()
-                edge_snapshot.ParseFromString(snapshot_file.read())
-                self._current_edge_snapshots[edge_snapshot.id] = edge_snapshot
+        self._load_graph_from_disk()
+        logger.info(
+            "Loaded graph has %d waypoints and %d edges",
+            len(self._current_graph.waypoints),
+            len(self._current_graph.edges),
+        )
 
         # Upload graph to robot
         logger.info("Uploading graph to robot...")
@@ -567,6 +1069,14 @@ class SpotController:
         self._current_annotation_name_to_wp_id, self._current_edges = update_waypoints_and_edges(
             self._current_graph, localization_id
         )
+
+    def _clear_loaded_graph_state(self) -> None:
+        """Reset cached graph data before loading another map."""
+        self._current_graph = None
+        self._current_waypoint_snapshots = {}
+        self._current_edge_snapshots = {}
+        self._current_annotation_name_to_wp_id = {}
+        self._current_edges = {}
 
     def _set_initial_localization_fiducial(self):
         """Trigger localization based on nearest fiducial."""
@@ -601,23 +1111,24 @@ class SpotController:
             await status_callback("Not connected to SPOT")
             return False
 
-        # Get waypoint short code
-        short_code = WAYPOINTS.get(location.lower())
-        if not short_code:
-            await status_callback(f"Unknown location: {location}")
+        location_name = location.strip()
+        if not location_name:
+            await status_callback("Missing destination waypoint name.")
             return False
+
+        identifier = WAYPOINTS.get(location_name.lower(), location_name)
 
         try:
             # Find the full waypoint ID
             destination_waypoint = await asyncio.to_thread(
                 find_unique_waypoint_id,
-                short_code,
+                identifier,
                 self._current_graph,
                 self._current_annotation_name_to_wp_id
             )
 
             if not destination_waypoint:
-                await status_callback(f"Could not find waypoint for {location}")
+                await status_callback(f"Unknown location: {location_name}")
                 return False
 
             # Power on if needed
@@ -629,11 +1140,15 @@ class SpotController:
                 return False
 
             # Navigate with heartbeat updates
-            logger.info(f"Starting navigation to {location} (waypoint: {destination_waypoint})")
-            await status_callback(f"Navigating to {location.title()}...")
+            logger.info(
+                "Starting navigation to %s (waypoint: %s)",
+                location_name,
+                destination_waypoint,
+            )
+            await status_callback(f"Navigating to {location_name}...")
             success = await self._navigate_to_waypoint_with_heartbeat(
                 destination_waypoint,
-                location,
+                location_name,
                 status_callback
             )
 

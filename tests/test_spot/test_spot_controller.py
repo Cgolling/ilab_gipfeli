@@ -58,6 +58,11 @@ class TestSpotControllerInit:
         assert controller._powered_on is False
         assert controller._started_powered_on is False
 
+    def test_current_map_name_uses_directory_name(self):
+        """Current map name should be derived from map path."""
+        controller = SpotController("host", "maps/map_catacombs_01")
+        assert controller.current_map_name == "map_catacombs_01"
+
 
 class TestSpotControllerIsConnected:
     """Tests for the is_connected property."""
@@ -251,6 +256,28 @@ class TestSpotControllerNavigateTo:
         mock_nav.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_navigate_named_waypoint_attempts_navigation(
+        self, connected_controller, mock_status_callback
+    ):
+        """Named waypoints from the loaded graph should work without static aliases."""
+        connected_controller._current_annotation_name_to_wp_id = {
+            "triangle": "triangle-vast-abc-456"
+        }
+
+        with patch.object(
+            SpotController, "_toggle_power", return_value=True
+        ), patch.object(
+            SpotController, "_navigate_to_waypoint_with_heartbeat",
+            return_value=True
+        ) as mock_nav:
+            result = await connected_controller.navigate_to(
+                "triangle", mock_status_callback
+            )
+
+        assert result is True
+        mock_nav.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_navigate_power_failure_returns_false(
         self, connected_controller, mock_status_callback
     ):
@@ -319,3 +346,69 @@ class TestSpotControllerImageMethods:
 
         data = await controller.capture_image_jpeg("frontleft_fisheye_image")
         assert data == b"jpeg-bytes"
+
+
+class TestSpotControllerMapRecording:
+    """Tests for GraphNav map recording helpers."""
+
+    @pytest.fixture
+    def recording_controller(self):
+        controller = SpotController("host", "maps/map_catacombs_01")
+        controller._connected = True
+        controller.robot = MagicMock()
+        controller.graph_nav_client = MagicMock()
+        controller.recording_client = MagicMock()
+        controller.map_processing_client = MagicMock()
+        return controller
+
+    @pytest.mark.asyncio
+    async def test_start_map_recording_rejects_existing_local_target(
+        self, recording_controller, mock_status_callback, tmp_path
+    ):
+        recording_controller.map_path = str(tmp_path / "maps" / "map_base")
+        target_dir = tmp_path / "maps" / "existing_map"
+        target_dir.mkdir(parents=True)
+
+        result = await recording_controller.start_map_recording("existing_map", mock_status_callback)
+
+        assert result is False
+        assert "already exists" in mock_status_callback.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_create_recording_waypoint_requires_active_recording(
+        self, recording_controller, mock_status_callback
+    ):
+        recording_controller.recording_client.get_record_status.return_value.is_recording = False
+
+        result = await recording_controller.create_recording_waypoint("desk", mock_status_callback)
+
+        assert result is False
+        assert "No active map recording" in mock_status_callback.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_save_recorded_map_requires_stop_first(
+        self, recording_controller, mock_status_callback
+    ):
+        recording_controller._recording_session_name = "hallway_room_9"
+        recording_controller.recording_client.get_record_status.return_value.is_recording = True
+
+        result, saved_path = await recording_controller.save_recorded_map(None, mock_status_callback)
+
+        assert result is False
+        assert saved_path is None
+        assert "Stop it first" in mock_status_callback.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_abort_map_recording_discards_graph_and_resets_state(
+        self, recording_controller, mock_status_callback
+    ):
+        recording_controller._recording_session_name = "hallway_room_9"
+        recording_controller._recording_has_unsaved_graph = True
+        recording_controller.recording_client.get_record_status.return_value.is_recording = False
+
+        result = await recording_controller.abort_map_recording(mock_status_callback)
+
+        assert result is True
+        recording_controller.graph_nav_client.clear_graph.assert_called_once()
+        assert recording_controller._recording_session_name is None
+        assert recording_controller._recording_has_unsaved_graph is False
