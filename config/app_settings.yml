@@ -1,0 +1,21 @@
+# Shared, non-secret runtime settings.
+# Keep secrets in .env (BOSDYN credentials, TELEGRAM_BOT_TOKEN).
+
+telegram:
+  spot_hostname: "192.168.80.3"
+  default_map_path: "maps/map_catacombs_01"
+  spot_auto_connect: true
+  rbac_enabled: true
+  rbac_config_path: "config/telegram_rbac.yml"
+  sounds_dir: "sounds"
+  snapshots_dir: "logs/perception_snapshots"
+  recordings_dir: "logs/perception_recordings"
+
+perception:
+  record_backend_default: "hybrid"
+  webrtc_sdp_port: 31102
+  webrtc_sdp_filename: "h264.sdp"
+  webrtc_verify_tls: false
+  webrtc_ca_cert_path:
+  webrtc_connect_timeout_seconds: 10.0
+  webrtc_ice_timeout_seconds: 15.0

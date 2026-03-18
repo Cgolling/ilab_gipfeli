@@ -1,0 +1,9 @@
+# Optional local overrides (do not commit app_settings.local.yml).
+# Copy to config/app_settings.local.yml and change only what you need.
+
+telegram:
+  spot_hostname: "192.168.80.3"
+  spot_auto_connect: false
+
+perception:
+  record_backend_default: "hybrid"

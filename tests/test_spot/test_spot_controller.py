@@ -17,6 +17,8 @@ Educational notes:
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from bosdyn.api import image_pb2
+
 from src.spot.spot_controller import SpotController
 
 
@@ -263,3 +265,57 @@ class TestSpotControllerNavigateTo:
         assert result is False
         msg = mock_status_callback.call_args[0][0]
         assert "power" in msg.lower()
+
+
+class TestSpotControllerImageMethods:
+    """Tests for image source listing and JPEG capture."""
+
+    def test_list_image_sources_returns_empty_when_disconnected(self):
+        controller = SpotController("host", "path")
+        controller._connected = False
+        controller.robot = MagicMock()
+        controller.image_client = MagicMock()
+
+        assert controller.list_image_sources() == []
+
+    def test_list_image_sources_returns_sorted_unique_names(self):
+        controller = SpotController("host", "path")
+        controller._connected = True
+        controller.robot = MagicMock()
+        controller.image_client = MagicMock()
+
+        src_a = MagicMock()
+        src_a.name = "frontright_fisheye_image"
+        src_b = MagicMock()
+        src_b.name = "frontleft_fisheye_image"
+        src_c = MagicMock()
+        src_c.name = "frontleft_fisheye_image"
+        controller.image_client.list_image_sources.return_value = [src_a, src_b, src_c]
+
+        names = controller.list_image_sources()
+        assert names == ["frontleft_fisheye_image", "frontright_fisheye_image"]
+
+    @pytest.mark.asyncio
+    async def test_capture_image_jpeg_returns_none_without_image_client(self):
+        controller = SpotController("host", "path")
+        controller._connected = True
+        controller.robot = MagicMock()
+        controller.image_client = None
+
+        result = await controller.capture_image_jpeg("frontleft_fisheye_image")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_capture_image_jpeg_returns_bytes_on_success(self):
+        controller = SpotController("host", "path")
+        controller._connected = True
+        controller.robot = MagicMock()
+        controller.image_client = MagicMock()
+
+        response = MagicMock()
+        response.shot.image.format = image_pb2.Image.FORMAT_JPEG
+        response.shot.image.data = b"jpeg-bytes"
+        controller.image_client.get_image.return_value = [response]
+
+        data = await controller.capture_image_jpeg("frontleft_fisheye_image")
+        assert data == b"jpeg-bytes"

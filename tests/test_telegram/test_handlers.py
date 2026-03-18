@@ -14,6 +14,7 @@ Educational notes:
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from src.perception.recording_manager import RecordingState, RecordingStatus
 from src.telegram.bot import (
     start,
     id_command,
@@ -24,6 +25,8 @@ from src.telegram.bot import (
     sound,
     sound_callback,
     volume,
+    snapshot,
+    record,
     env_var_is_true,
     CALLBACK_DATA_PREFIX,
     SOUND_CALLBACK_DATA_PREFIX,
@@ -84,6 +87,8 @@ class TestHelpCommand:
         assert "/goto" in help_text
         assert "/sound" in help_text
         assert "/volume" in help_text
+        assert "/snapshot" in help_text
+        assert "/record" in help_text
 
     @pytest.mark.asyncio
     async def test_help_mentions_spot_robot(
@@ -449,6 +454,238 @@ class TestVolumeCommand:
 
         reply = mock_telegram_update.message.reply_text.call_args[0][0]
         assert "must be a number" in reply.lower()
+
+
+class TestSnapshotCommand:
+    """Tests for /snapshot command."""
+
+    @pytest.mark.asyncio
+    async def test_snapshot_without_args_lists_sources(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        mock_telegram_context.args = []
+        manager = MagicMock()
+        manager.list_sources = AsyncMock(
+            return_value=(True, "ok", ["frontleft_fisheye_image", "frontright_fisheye_image"])
+        )
+
+        with patch("src.telegram.bot.snapshot_manager", manager):
+            await snapshot(mock_telegram_update, mock_telegram_context)
+
+        reply = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "Available image sources" in reply
+        assert "frontleft_fisheye_image" in reply
+
+    @pytest.mark.asyncio
+    async def test_snapshot_with_source_captures_file(
+        self, mock_telegram_update, mock_telegram_context, tmp_path
+    ):
+        mock_telegram_context.args = ["frontleft_fisheye_image"]
+        manager = MagicMock()
+        image_path = tmp_path / "snapshot.jpg"
+        image_path.write_bytes(b"jpeg-bytes")
+        result = MagicMock()
+        result.source = "frontleft_fisheye_image"
+        result.saved_path = str(image_path)
+        result.byte_size = 1234
+        result.captured_at.strftime.return_value = "2026-02-21 10:00:00 UTC"
+        manager.capture_snapshot = AsyncMock(return_value=(True, "saved", result))
+
+        with patch("src.telegram.bot.snapshot_manager", manager):
+            await snapshot(mock_telegram_update, mock_telegram_context)
+
+        mock_telegram_update.message.reply_photo.assert_called_once()
+        photo_kwargs = mock_telegram_update.message.reply_photo.call_args.kwargs
+        assert "caption" not in photo_kwargs or photo_kwargs["caption"] is None
+        calls = [call[0][0] for call in mock_telegram_update.message.reply_text.call_args_list]
+        assert any("Capturing snapshot" in text for text in calls)
+        assert not any("Source:" in text for text in calls)
+
+    @pytest.mark.asyncio
+    async def test_snapshot_failure_shows_usage(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        mock_telegram_context.args = ["unknown_source"]
+        manager = MagicMock()
+        manager.capture_snapshot = AsyncMock(return_value=(False, "Unknown source", None))
+
+        with patch("src.telegram.bot.snapshot_manager", manager):
+            await snapshot(mock_telegram_update, mock_telegram_context)
+
+        final_reply = mock_telegram_update.message.reply_text.call_args_list[-1][0][0]
+        assert "Unknown source" in final_reply
+        assert "Snapshot command usage" in final_reply
+
+    @pytest.mark.asyncio
+    async def test_snapshot_admin_gets_source_caption_and_details(
+        self, mock_telegram_update, mock_telegram_context, tmp_path
+    ):
+        mock_telegram_context.args = ["frontleft_fisheye_image"]
+        config = RbacConfig(
+            private_only=True,
+            admin_user_ids={12345},
+            users={},
+        )
+        manager = MagicMock()
+        image_path = tmp_path / "snapshot.jpg"
+        image_path.write_bytes(b"jpeg-bytes")
+        result = MagicMock()
+        result.source = "frontleft_fisheye_image"
+        result.saved_path = str(image_path)
+        result.byte_size = 1234
+        result.captured_at.strftime.return_value = "2026-02-21 10:00:00 UTC"
+        manager.capture_snapshot = AsyncMock(return_value=(True, "saved", result))
+
+        with patch("src.telegram.bot.rbac_enabled", True), patch(
+            "src.telegram.bot.rbac_config", config
+        ), patch("src.telegram.bot.snapshot_manager", manager):
+            await snapshot(mock_telegram_update, mock_telegram_context)
+
+        photo_kwargs = mock_telegram_update.message.reply_photo.call_args.kwargs
+        assert "Snapshot from 'frontleft_fisheye_image'" == photo_kwargs["caption"]
+        calls = [call[0][0] for call in mock_telegram_update.message.reply_text.call_args_list]
+        assert any("Snapshot captured." in text for text in calls)
+        assert any("Source: frontleft_fisheye_image" in text for text in calls)
+
+    @pytest.mark.asyncio
+    async def test_snapshot_operator_gets_image_without_source_details_when_rbac_enabled(
+        self, mock_telegram_update, mock_telegram_context, tmp_path
+    ):
+        mock_telegram_context.args = ["frontleft_fisheye_image"]
+        mock_telegram_update.effective_user.id = 222
+        config = RbacConfig(
+            private_only=True,
+            admin_user_ids=set(),
+            users={222: "operator"},
+        )
+        manager = MagicMock()
+        image_path = tmp_path / "snapshot.jpg"
+        image_path.write_bytes(b"jpeg-bytes")
+        result = MagicMock()
+        result.source = "frontleft_fisheye_image"
+        result.saved_path = str(image_path)
+        result.byte_size = 1234
+        result.captured_at.strftime.return_value = "2026-02-21 10:00:00 UTC"
+        manager.capture_snapshot = AsyncMock(return_value=(True, "saved", result))
+
+        with patch("src.telegram.bot.rbac_enabled", True), patch(
+            "src.telegram.bot.rbac_config", config
+        ), patch("src.telegram.bot.snapshot_manager", manager):
+            await snapshot(mock_telegram_update, mock_telegram_context)
+
+        photo_kwargs = mock_telegram_update.message.reply_photo.call_args.kwargs
+        assert "caption" not in photo_kwargs or photo_kwargs["caption"] is None
+        calls = [call[0][0] for call in mock_telegram_update.message.reply_text.call_args_list]
+        assert not any("Source:" in text for text in calls)
+
+
+class TestRecordCommand:
+    """Tests for /record command."""
+
+    @pytest.mark.asyncio
+    async def test_record_without_args_shows_usage(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        mock_telegram_context.args = []
+
+        await record(mock_telegram_update, mock_telegram_context)
+
+        reply = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "Record command usage" in reply
+
+    @pytest.mark.asyncio
+    async def test_record_start_without_source_calls_manager_without_source(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        mock_telegram_context.args = ["start"]
+        manager = MagicMock()
+        manager.start_recording = AsyncMock(return_value=(True, "WebRTC recording started"))
+
+        with patch("src.telegram.bot.recording_manager", manager):
+            await record(mock_telegram_update, mock_telegram_context)
+
+        manager.start_recording.assert_called_once_with(None)
+        reply = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "WebRTC recording started" in reply
+
+    @pytest.mark.asyncio
+    async def test_record_start_with_source_calls_manager(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        mock_telegram_context.args = ["start", "frontleft_fisheye_image"]
+        manager = MagicMock()
+        manager.start_recording = AsyncMock(return_value=(True, "Recording started"))
+
+        with patch("src.telegram.bot.recording_manager", manager):
+            await record(mock_telegram_update, mock_telegram_context)
+
+        manager.start_recording.assert_called_once_with("frontleft_fisheye_image")
+        reply = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "Recording started" in reply
+
+    @pytest.mark.asyncio
+    async def test_record_stop_sends_video(
+        self, mock_telegram_update, mock_telegram_context, tmp_path
+    ):
+        mock_telegram_context.args = ["stop"]
+        video_path = tmp_path / "recording.mp4"
+        video_path.write_bytes(b"video-bytes")
+        result = MagicMock()
+        result.source = "frontleft_fisheye_image"
+        result.video_path = str(video_path)
+        result.frame_count = 5
+        result.duration_seconds = 3.2
+        result.backend = "timelapse"
+        result.has_audio = False
+
+        manager = MagicMock()
+        manager.stop_recording = AsyncMock(return_value=(True, "ok", result))
+
+        with patch("src.telegram.bot.recording_manager", manager):
+            await record(mock_telegram_update, mock_telegram_context)
+
+        mock_telegram_update.message.reply_video.assert_called_once()
+        texts = [call[0][0] for call in mock_telegram_update.message.reply_text.call_args_list]
+        assert any("Finalizing recording" in text for text in texts)
+        assert any("Recording finalized." in text for text in texts)
+
+    @pytest.mark.asyncio
+    async def test_record_abort_calls_manager(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        mock_telegram_context.args = ["abort"]
+        manager = MagicMock()
+        manager.abort_recording = AsyncMock(return_value=(True, "Recording aborted and discarded."))
+
+        with patch("src.telegram.bot.recording_manager", manager):
+            await record(mock_telegram_update, mock_telegram_context)
+
+        manager.abort_recording.assert_called_once()
+        reply = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "aborted" in reply.lower()
+
+    @pytest.mark.asyncio
+    async def test_record_status_reports_state(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        mock_telegram_context.args = ["status"]
+        manager = MagicMock()
+        manager.get_status = AsyncMock(
+            return_value=RecordingStatus(
+                state=RecordingState.RECORDING,
+                source="frontleft_fisheye_image",
+                frame_count=4,
+                duration_seconds=2.1,
+            )
+        )
+
+        with patch("src.telegram.bot.recording_manager", manager):
+            await record(mock_telegram_update, mock_telegram_context)
+
+        reply = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "Recording status" in reply
+        assert "recording" in reply.lower()
+        assert "backend" in reply.lower()
 
 
 class TestRbacEnforcement:
