@@ -1,6 +1,6 @@
 """Tests for Telegram bot command handlers."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 
@@ -30,6 +30,7 @@ class TestStartCommand:
         mock_telegram_context.bot.send_message.assert_awaited_once_with(
             chat_id=12345,
             text="You are in control.",
+            reply_markup=ANY,
         )
 
     @pytest.mark.asyncio
@@ -41,7 +42,7 @@ class TestStartCommand:
 
         await start(mock_telegram_update, mock_telegram_context)
 
-        mock_telegram_update.message.reply_text.assert_awaited_with("You are in control.")
+        mock_telegram_update.message.reply_text.assert_awaited_with("You are in control.", reply_markup=ANY)
         mock_telegram_context.bot.send_message.assert_not_awaited()
 
 
@@ -55,8 +56,8 @@ class TestHelpCommand:
         await help_command(mock_telegram_update, mock_telegram_context)
 
         help_text = mock_telegram_update.message.reply_text.call_args[0][0]
-        assert "/start - Join the control queue" in help_text
-        assert "/stop - Release control or leave the queue" in help_text
+        assert "Start" in help_text
+        assert "Stop" in help_text
 
 
 class TestIdCommand:
@@ -151,7 +152,7 @@ class TestGotoCommand:
             for row in reply_markup.inline_keyboard
             for button in row
         ]
-        assert button_texts == ["Aula", "Turnhalle", "Zimmer 9"]
+        assert button_texts == ["Aula", "Turnhalle", "Zimmer 9", "Home"]
 
 
 class TestGotoCallback:
@@ -163,6 +164,7 @@ class TestGotoCallback:
     ):
         update = MagicMock()
         update.callback_query = mock_callback_query
+        update.message = None
         update.effective_user.id = 12345
 
         await goto_callback(update, mock_telegram_context)
@@ -187,12 +189,18 @@ class TestGotoCallback:
         mock_telegram_context.bot_data["spot_controller"] = controller
 
         mock_callback_query.data = f"{CALLBACK_DATA_PREFIX}aula"
+        mock_callback_query.message.chat.id = 12345
+
+        # send_message returns a message object whose edit_text we can track
+        status_msg = MagicMock()
+        status_msg.edit_text = AsyncMock()
+        mock_telegram_context.bot.send_message = AsyncMock(return_value=status_msg)
 
         await goto_callback(update, mock_telegram_context)
 
         controller.navigate_to.assert_called_once()
         assert controller.navigate_to.call_args[0][0] == "aula"
-        final_message = mock_callback_query.edit_message_text.call_args[0][0]
+        final_message = status_msg.edit_text.call_args[0][0]
         assert "Arrived" in final_message
 
 
@@ -205,7 +213,7 @@ class TestStopCommand:
     ):
         await stop_command(mock_telegram_update, mock_telegram_context)
 
-        mock_telegram_update.message.reply_text.assert_awaited_with("You are not in the queue.")
+        mock_telegram_update.message.reply_text.assert_awaited_with("You are not in the queue.", reply_markup=ANY)
 
     @pytest.mark.asyncio
     async def test_stop_releases_control_and_promotes_next_user(self, mock_telegram_context):
@@ -219,10 +227,11 @@ class TestStopCommand:
 
         await stop_command(update, mock_telegram_context)
 
-        update.message.reply_text.assert_awaited_with("You released control.")
+        update.message.reply_text.assert_awaited_with("You released control.", reply_markup=ANY)
         mock_telegram_context.bot.send_message.assert_awaited_once_with(
             chat_id=222,
             text="You are in control.",
+            reply_markup=ANY,
         )
 
     @pytest.mark.asyncio
@@ -238,8 +247,9 @@ class TestStopCommand:
 
         await stop_command(update, mock_telegram_context)
 
-        update.message.reply_text.assert_awaited_with("You left the queue.")
+        update.message.reply_text.assert_awaited_with("You left the queue.", reply_markup=ANY)
         mock_telegram_context.bot.send_message.assert_awaited_once_with(
             chat_id=333,
             text="You are 2. in the queue.",
+            reply_markup=ANY,
         )

@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.error import BadRequest, NetworkError
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
@@ -48,7 +48,52 @@ WAYPOINTS = {
     "aula": "Aula",
     "turnhalle": "Turnhalle",
     "zimmer9": "Zimmer 9",
+    "home": "Home",
 }
+
+# Reply keyboard button labels
+BTN_START = "Start"
+BTN_STOP = "Stop"
+BTN_STATUS = "Status"
+BTN_HELP = "Help"
+BTN_MY_ID = "My ID"
+BTN_GOTO = "Go To"
+BTN_STANDUP = "Stand Up"
+BTN_SITDOWN = "Sit Down"
+
+# Keyboards for different states
+KB_INITIAL = ReplyKeyboardMarkup(
+    [[BTN_START, BTN_STATUS], [BTN_HELP, BTN_MY_ID]],
+    resize_keyboard=True,
+    is_persistent=True,
+    input_field_placeholder="Tap a button to get started",
+)
+
+KB_HAS_CONTROL = ReplyKeyboardMarkup(
+    [[BTN_GOTO], [BTN_STANDUP, BTN_SITDOWN], [BTN_STATUS, BTN_STOP]],
+    resize_keyboard=True,
+    is_persistent=True,
+    input_field_placeholder="You have control of SPOT",
+)
+
+KB_IN_QUEUE = ReplyKeyboardMarkup(
+    [[BTN_STATUS, BTN_STOP]],
+    resize_keyboard=True,
+    is_persistent=True,
+    input_field_placeholder="Waiting in queue...",
+)
+
+
+def _keyboard_for_user(user_id: int | None, context: ContextTypes.DEFAULT_TYPE) -> ReplyKeyboardMarkup:
+    """Return the appropriate reply keyboard based on the user's queue state."""
+    if user_id is None:
+        return KB_INITIAL
+    control_queue = _get_control_queue(context)
+    if control_queue.has_control(user_id):
+        return KB_HAS_CONTROL
+    if control_queue.status_message_for(user_id) is not None:
+        return KB_IN_QUEUE
+    return KB_INITIAL
 
 
 def _get_security_config(context: ContextTypes.DEFAULT_TYPE) -> SecurityConfig:
@@ -108,7 +153,8 @@ async def _notify_queue_updates(
         if chat_id is None:
             continue
 
-        await context.bot.send_message(chat_id=chat_id, text=message)
+        keyboard = _keyboard_for_user(user_id, context)
+        await context.bot.send_message(chat_id=chat_id, text=message, reply_markup=keyboard)
 
 
 async def _ensure_control(
@@ -162,12 +208,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
     if added:
+        keyboard = _keyboard_for_user(user.id, context)
+        status_message = control_queue.status_message_for(user.id)
+        if status_message:
+            await update.message.reply_text(status_message, reply_markup=keyboard)
         await _notify_queue_updates(context, previous_statuses)
         return
 
     status_message = control_queue.status_message_for(user.id)
     if status_message:
-        await update.message.reply_text(status_message)
+        keyboard = _keyboard_for_user(user.id, context)
+        await update.message.reply_text(status_message, reply_markup=keyboard)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -176,23 +227,24 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not update.message:
         return
     
+    user = update.effective_user
+    keyboard = _keyboard_for_user(getattr(user, "id", None), context)
     await update.message.reply_text(
         "SPOT Robot Control Bot\n\n"
-        "Connection:\n"
-        "/connect - Connect to SPOT robot (admin)\n"
-        "/disconnect - Disconnect and release lease (admin)\n"
-        "/forceconnect - Force take control (admin)\n"
-        "/status - Show robot status\n\n"
-        "Posture:\n"
-        "/standup - Make SPOT stand up\n"
-        "/sitdown - Make SPOT sit down\n\n"
-        "Navigation:\n"
-        "/goto - Navigate to a location\n\n"
-        "Other:\n"
-        "/id - Show your Telegram user ID\n"
-        "/start - Join the control queue\n"
-        "/stop - Release control or leave the queue\n"
-        "/help - Show this help message"
+        "Use the buttons below to control SPOT.\n\n"
+        "Admin commands (type manually):\n"
+        "/connect - Connect to SPOT robot\n"
+        "/disconnect - Disconnect and release lease\n"
+        "/forceconnect - Force take control\n\n"
+        "All commands:\n"
+        "Start - Join the control queue\n"
+        "Stop - Release control or leave the queue\n"
+        "Go To - Navigate to a location\n"
+        "Stand Up / Sit Down - Control posture\n"
+        "Status - Show robot status\n"
+        "Help - Show this help message\n"
+        "My ID - Show your Telegram user ID",
+        reply_markup=keyboard,
     )
 
 
@@ -296,11 +348,15 @@ async def status_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not update.message:
         return
     
+    user = update.effective_user
+    keyboard = _keyboard_for_user(getattr(user, "id", None), context)
+
     spot_controller = context.bot_data.get("spot_controller")
     if spot_controller is None:
         await update.message.reply_text(
             "SPOT Status: Not initialized\n\n"
-            "Use /connect to connect to the robot."
+            "Use /connect to connect to the robot.",
+            reply_markup=keyboard,
         )
         return
 
@@ -335,11 +391,11 @@ async def status_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if status["lease_owner"]:
             lines.append(f"Lease Owner: {status['lease_owner']}")
 
-        await update.message.reply_text("\n".join(lines))
+        await update.message.reply_text("\n".join(lines), reply_markup=keyboard)
 
     except Exception as e:
         logger.exception(f"Error getting status: {e}")
-        await update.message.reply_text(f"Error getting status: {e}")
+        await update.message.reply_text(f"Error getting status: {e}", reply_markup=keyboard)
 
 
 async def goto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -394,10 +450,24 @@ async def goto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.edit_message_text("SPOT not connected. Use /connect first.")
         return
 
-    # Navigate with heartbeat updates
+    # Replace the inline keyboard message with a confirmation, then send a
+    # separate status message that we edit with heartbeat updates.  Editing a
+    # standalone message is more reliable than editing the inline-keyboard
+    # message repeatedly (Telegram can reject edits on callback messages).
+    await query.edit_message_text(f"Navigating to {location_name}...")
+    chat_id = query.message.chat.id if query.message else None
+    status_message = None
+    if chat_id:
+        status_message = await context.bot.send_message(
+            chat_id=chat_id, text=f"Navigating to {location_name}..."
+        )
+
     async def send_status(msg: str):
+        nonlocal status_message
+        if status_message is None:
+            return
         try:
-            await query.edit_message_text(msg)
+            await status_message.edit_text(msg)
         except BadRequest as e:
             # Expected: message not modified, deleted, or user blocked bot
             logger.debug(f"Could not update status message: {e}")
@@ -410,15 +480,15 @@ async def goto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         success = await spot_controller.navigate_to(location, send_status)
     except Exception as e:
         logger.exception(f"Navigation error: {e}")
-        await query.edit_message_text(f"Error during navigation: {e}")
+        await send_status(f"Error during navigation: {e}")
         return
 
     if success:
         logger.info(f"Navigation to {location_name} completed successfully")
-        await query.edit_message_text(f"Arrived at {location_name}!")
+        await send_status(f"Arrived at {location_name}!")
     else:
         logger.warning(f"Navigation to {location_name} failed")
-        await query.edit_message_text(f"Failed to navigate to {location_name}")
+        await send_status(f"Failed to navigate to {location_name}")
 
 
 async def standup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -468,8 +538,10 @@ async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     user = update.effective_user
     role = get_user_role(user.id, _get_security_config(context))
+    keyboard = _keyboard_for_user(user.id, context)
     await update.message.reply_text(
-        f"Your Telegram user ID is {user.id}.\nRole: {role}"
+        f"Your Telegram user ID is {user.id}.\nRole: {role}",
+        reply_markup=keyboard,
     )
 
 
@@ -484,13 +556,13 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     _, had_control = control_queue.leave(user.id)
 
     if user.id not in previous_statuses:
-        await update.message.reply_text("You are not in the queue.")
+        await update.message.reply_text("You are not in the queue.", reply_markup=KB_INITIAL)
         return
 
     if had_control:
-        await update.message.reply_text("You released control.")
+        await update.message.reply_text("You released control.", reply_markup=KB_INITIAL)
     else:
-        await update.message.reply_text("You left the queue.")
+        await update.message.reply_text("You left the queue.", reply_markup=KB_INITIAL)
 
     await _notify_queue_updates(context, previous_statuses)
 
@@ -499,9 +571,12 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Inform the user that the command was not found."""
     if not update.message:
         return
+    user = update.effective_user
+    keyboard = _keyboard_for_user(getattr(user, "id", None), context)
     await update.message.reply_text(
         "Sorry, I didn't understand that command.\n"
-        "Use /help to see available commands."
+        "Use the buttons below or /help to see available commands.",
+        reply_markup=keyboard,
     )
 
 
@@ -598,6 +673,16 @@ def main() -> None:
     application.add_handler(CommandHandler("stop", stop_command))
     application.add_handler(CommandHandler("id", id_command))
     application.add_handler(CommandHandler("help", help_command))
+
+    # Reply keyboard button handlers (text messages matching button labels)
+    application.add_handler(MessageHandler(filters.Text([BTN_START]), start))
+    application.add_handler(MessageHandler(filters.Text([BTN_STOP]), stop_command))
+    application.add_handler(MessageHandler(filters.Text([BTN_STATUS]), status_spot))
+    application.add_handler(MessageHandler(filters.Text([BTN_HELP]), help_command))
+    application.add_handler(MessageHandler(filters.Text([BTN_MY_ID]), id_command))
+    application.add_handler(MessageHandler(filters.Text([BTN_GOTO]), goto))
+    application.add_handler(MessageHandler(filters.Text([BTN_STANDUP]), standup))
+    application.add_handler(MessageHandler(filters.Text([BTN_SITDOWN]), sitdown))
 
     # handle unknown commands
     application.add_handler(MessageHandler(filters.COMMAND, unknown_command))

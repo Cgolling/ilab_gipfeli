@@ -31,8 +31,9 @@ logger = logging.getLogger(__name__)
 # Waypoint mapping: location name -> waypoint short code
 WAYPOINTS = {
     "aula": "ck",
-    "turnhalle": "fc",
-    "zimmer 9": "bw",
+    "turnhalle": "sm",
+    "zimmer9": "bh",
+    "home": "sw",
 }
 
 # Timing constants (seconds)
@@ -576,12 +577,6 @@ class SpotController:
             return False
 
         try:
-            # Activate walking LEDs
-            try:
-                await asyncio.to_thread(self._activate_walking_leds)
-            except Exception:
-                pass
-
             # Find the full waypoint ID
             destination_waypoint = await asyncio.to_thread(
                 find_unique_waypoint_id,
@@ -601,6 +596,12 @@ class SpotController:
                 logger.error("Failed to power on robot motors")
                 await status_callback("Failed to power on robot")
                 return False
+
+            # Activate walking LEDs after power on so they don't get reset
+            try:
+                await asyncio.to_thread(self._activate_walking_leds)
+            except Exception:
+                pass
 
             # Navigate with heartbeat updates
             logger.info(f"Starting navigation to {location} (waypoint: {destination_waypoint})")
