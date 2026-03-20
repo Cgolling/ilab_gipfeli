@@ -198,6 +198,29 @@ SPOT_HOSTNAME=192.168.80.3
 TELEGRAM_BOT_TOKEN=dein_telegram_token
 ```
 
+### Telegram Rollen konfigurieren
+
+Die Bot-Rechte werden über `config/telegram_rbac.toml` gesteuert.
+
+Standardverhalten:
+- Jeder neue Nutzer ist automatisch `user`
+- `user` darf normale Befehle wie `/status`, `/goto`, `/standup`, `/sitdown` verwenden
+- Nur `admin` darf `/connect`, `/disconnect` und `/forceconnect` ausführen
+- Robot-Kontrolle läuft zusätzlich über eine Laufzeit-Queue:
+  - `/start` reiht dich ein
+  - der erste Nutzer hat Kontrolle
+  - `/stop` gibt Kontrolle frei oder verlässt die Queue
+
+Um einen Admin freizuschalten, trägst du dessen Telegram-ID in `config/telegram_rbac.toml` ein:
+
+```toml
+admin_user_ids = [
+    123456789,
+]
+```
+
+Die eigene Telegram-ID kann man im Bot mit `/id` anzeigen lassen.
+
 ### Telegram Bot erstellen
 
 Um den Telegram-Bot zu nutzen, brauchst du einen **Bot Token** von Telegram.
@@ -267,13 +290,17 @@ ilab_gipfeli/
 
 | Befehl | Beschreibung |
 |--------|--------------|
-| `/start` | Begrüssung und Übersicht |
+| `/start` | Der Control-Queue beitreten |
+| `/stop` | Kontrolle freigeben oder Queue verlassen |
 | `/help` | Liste aller Befehle |
-| `/connect` | Verbindung zu SPOT herstellen |
-| `/disconnect` | Verbindung trennen und Lease freigeben |
-| `/forceconnect` | Lease erzwingen (falls blockiert) |
+| `/connect` | Verbindung zu SPOT herstellen (nur Admin) |
+| `/disconnect` | Verbindung trennen und Lease freigeben (nur Admin) |
+| `/forceconnect` | Lease erzwingen (falls blockiert, nur Admin) |
 | `/status` | Roboter-Status anzeigen (Batterie, etc.) |
-| `/goto` | SPOT zu einem Standort navigieren |
+| `/standup` | SPOT aufstehen lassen |
+| `/sitdown` | SPOT sitzen lassen |
+| `/goto` | SPOT zu einem Standort navigieren (nur mit aktueller Kontrolle) |
+| `/id` | Eigene Telegram-ID und Rolle anzeigen |
 
 **Verfügbare Standorte für `/goto`:**
 - Aula

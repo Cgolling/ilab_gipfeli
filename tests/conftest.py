@@ -15,6 +15,9 @@ Educational notes for new developers:
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
+from src.telegram.control_queue import ControlQueue
+from src.telegram.security import SecurityConfig
+
 
 @pytest.fixture
 def mock_status_callback() -> AsyncMock:
@@ -101,6 +104,8 @@ def mock_telegram_update():
     update = MagicMock()
     update.effective_user.mention_html.return_value = "<b>TestUser</b>"
     update.effective_user.id = 12345
+    update.effective_user.full_name = "Test User"
+    update.effective_chat.id = 12345
     update.message.reply_text = AsyncMock()
     update.message.reply_html = AsyncMock()
     update.message.text = "test message"
@@ -115,7 +120,14 @@ def mock_telegram_context():
     Returns a MagicMock that simulates the context passed to
     Telegram command handlers.
     """
-    return MagicMock()
+    context = MagicMock()
+    context.bot = MagicMock()
+    context.bot.send_message = AsyncMock()
+    context.bot_data = {
+        "security_config": SecurityConfig(admin_user_ids=frozenset()),
+        "control_queue": ControlQueue(),
+    }
+    return context
 
 
 @pytest.fixture

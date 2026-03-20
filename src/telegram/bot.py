@@ -12,18 +12,26 @@ via Telegram, including navigation to predefined waypoints.
 import logging
 import os
 import sys
-from typing import Optional
+from pathlib import Path
 
 # Add project root to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from dotenv import load_dotenv
-from telegram import ForceReply, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest, NetworkError
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
 from src.spot import SpotController
 from src.logging_config import setup_logging
+from src.telegram.control_queue import ControlQueue
+from src.telegram.security import (
+    SecurityConfig,
+    can_execute_command,
+    describe_access_denied,
+    get_user_role,
+    load_security_config,
+)
 
 # Initialize logging (safe to call multiple times)
 setup_logging()
@@ -34,6 +42,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_SPOT_HOSTNAME = "192.168.8.200"
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 DEFAULT_MAP_PATH = os.path.join(PROJECT_ROOT, "maps/ilabZi9_withWP")
+DEFAULT_SECURITY_CONFIG_PATH = Path(PROJECT_ROOT) / "config" / "telegram_rbac.toml"
 CALLBACK_DATA_PREFIX = "goto_"
 WAYPOINTS = {
     "aula": "Aula",
@@ -41,17 +50,124 @@ WAYPOINTS = {
     "zimmer9": "Zimmer 9",
 }
 
+
+def _get_security_config(context: ContextTypes.DEFAULT_TYPE) -> SecurityConfig:
+    """Return the loaded security configuration."""
+    return context.bot_data["security_config"]
+
+
+def _get_control_queue(context: ContextTypes.DEFAULT_TYPE) -> ControlQueue:
+    """Return the current control queue."""
+    return context.bot_data["control_queue"]
+
+
+async def _reply_access_denied(update: Update, command_name: str) -> None:
+    """Send an access denied message for a command."""
+    message = describe_access_denied(command_name)
+
+    if update.message:
+        await update.message.reply_text(message)
+        return
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(message)
+
+
+async def _authorize_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, command_name: str
+) -> bool:
+    """Check whether the effective user may execute the command."""
+    user = update.effective_user
+    config = _get_security_config(context)
+
+    if can_execute_command(command_name, getattr(user, "id", None), config):
+        return True
+
+    logger.warning(
+        "Denied command /%s for Telegram user %s",
+        command_name,
+        getattr(user, "id", None),
+    )
+    await _reply_access_denied(update, command_name)
+    return False
+
+
+async def _notify_queue_updates(
+    context: ContextTypes.DEFAULT_TYPE, previous_statuses: dict[int, str]
+) -> None:
+    """Notify queued users if their queue status changed."""
+    control_queue = _get_control_queue(context)
+    current_statuses = control_queue.user_statuses()
+
+    for user_id, message in current_statuses.items():
+        if previous_statuses.get(user_id) == message:
+            continue
+
+        chat_id = control_queue.chat_id_for(user_id)
+        if chat_id is None:
+            continue
+
+        await context.bot.send_message(chat_id=chat_id, text=message)
+
+
+async def _ensure_control(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, command_name: str
+) -> bool:
+    """Require that the current user holds robot control before proceeding."""
+    user = update.effective_user
+    control_queue = _get_control_queue(context)
+
+    if control_queue.has_control(getattr(user, "id", None)):
+        return True
+
+    status_message = control_queue.status_message_for(getattr(user, "id", None))
+    if status_message is None:
+        message = (
+            f"`/{command_name}` requires control.\n"
+            "Use /start to join the queue."
+        )
+    else:
+        message = (
+            f"`/{command_name}` requires control.\n"
+            f"{status_message}"
+        )
+
+    if update.message:
+        await update.message.reply_text(message)
+        return False
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(message)
+        return False
+
+    return False
+
 # Define a few command handlers. These usually take the two arguments update and
 # context.
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a message when the command /start is issued."""
+    """Join the robot control queue or show current queue status."""
     user = update.effective_user
-    if not update.message or not user:
+    chat = update.effective_chat
+    if not update.message or not user or not chat:
         return
-    await update.message.reply_html(
-        rf"Hi {user.mention_html()}!",
-        reply_markup=ForceReply(selective=True),
+
+    control_queue = _get_control_queue(context)
+    previous_statuses = control_queue.user_statuses()
+    _, added = control_queue.join(
+        user_id=user.id,
+        chat_id=chat.id,
+        display_name=user.full_name,
     )
+
+    if added:
+        await _notify_queue_updates(context, previous_statuses)
+        return
+
+    status_message = control_queue.status_message_for(user.id)
+    if status_message:
+        await update.message.reply_text(status_message)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -63,9 +179,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(
         "SPOT Robot Control Bot\n\n"
         "Connection:\n"
-        "/connect - Connect to SPOT robot\n"
-        "/disconnect - Disconnect and release lease\n"
-        "/forceconnect - Force take control (use if stuck!)\n"
+        "/connect - Connect to SPOT robot (admin)\n"
+        "/disconnect - Disconnect and release lease (admin)\n"
+        "/forceconnect - Force take control (admin)\n"
         "/status - Show robot status\n\n"
         "Posture:\n"
         "/standup - Make SPOT stand up\n"
@@ -73,7 +189,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Navigation:\n"
         "/goto - Navigate to a location\n\n"
         "Other:\n"
-        "/start - Start the bot\n"
+        "/id - Show your Telegram user ID\n"
+        "/start - Join the control queue\n"
+        "/stop - Release control or leave the queue\n"
         "/help - Show this help message"
     )
 
@@ -134,17 +252,23 @@ async def _handle_connection(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 async def connect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Connect to SPOT robot."""
+    if not await _authorize_command(update, context, "connect"):
+        return
     await _handle_connection(update, context, force=False)
 
 
 async def forceconnect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Force connect to SPOT robot, taking the lease from any other client."""
+    if not await _authorize_command(update, context, "forceconnect"):
+        return
     await _handle_connection(update, context, force=True)
 
 
 async def disconnect_spot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Disconnect from SPOT and release the lease."""
     if not update.message:
+        return
+    if not await _authorize_command(update, context, "disconnect"):
         return
 
     spot_controller = context.bot_data.get("spot_controller")
@@ -222,6 +346,10 @@ async def goto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send inline keyboard with location options."""
     if not update.message:
         return
+    if not await _authorize_command(update, context, "goto"):
+        return
+    if not await _ensure_control(update, context, "goto"):
+        return
     
     spot_controller = context.bot_data.get("spot_controller")
     if spot_controller is None or not spot_controller.is_connected:
@@ -245,6 +373,10 @@ async def goto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def goto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle goto button presses and navigate SPOT to the selected location."""
     if not update.callback_query:
+        return
+    if not await _authorize_command(update, context, "goto"):
+        return
+    if not await _ensure_control(update, context, "goto"):
         return
     
     query = update.callback_query
@@ -293,6 +425,8 @@ async def standup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Make SPOT stand up."""
     if not update.message:
         return
+    if not await _ensure_control(update, context, "standup"):
+        return
 
     spot_controller = context.bot_data.get("spot_controller")
     if spot_controller is None or not spot_controller.is_connected:
@@ -311,6 +445,8 @@ async def sitdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Make SPOT sit down."""
     if not update.message:
         return
+    if not await _ensure_control(update, context, "sitdown"):
+        return
 
     spot_controller = context.bot_data.get("spot_controller")
     if spot_controller is None or not spot_controller.is_connected:
@@ -323,6 +459,40 @@ async def sitdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         logger.exception(f"Sit failed: {e}")
         await update.message.reply_text(f"Failed to sit: {e}")
+
+
+async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show the Telegram user ID and effective role."""
+    if not update.message or not update.effective_user:
+        return
+
+    user = update.effective_user
+    role = get_user_role(user.id, _get_security_config(context))
+    await update.message.reply_text(
+        f"Your Telegram user ID is {user.id}.\nRole: {role}"
+    )
+
+
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Release robot control or leave the queue."""
+    user = update.effective_user
+    if not update.message or not user:
+        return
+
+    control_queue = _get_control_queue(context)
+    previous_statuses = control_queue.user_statuses()
+    _, had_control = control_queue.leave(user.id)
+
+    if user.id not in previous_statuses:
+        await update.message.reply_text("You are not in the queue.")
+        return
+
+    if had_control:
+        await update.message.reply_text("You released control.")
+    else:
+        await update.message.reply_text("You left the queue.")
+
+    await _notify_queue_updates(context, previous_statuses)
 
 
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -406,6 +576,8 @@ def main() -> None:
         .post_shutdown(post_shutdown) # Release lease on shutdown
         .build()
     )
+    application.bot_data["security_config"] = load_security_config(DEFAULT_SECURITY_CONFIG_PATH)
+    application.bot_data["control_queue"] = ControlQueue()
 
     # Connection commands
     application.add_handler(CommandHandler("connect", connect_spot))
@@ -423,6 +595,8 @@ def main() -> None:
 
     # General commands
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("stop", stop_command))
+    application.add_handler(CommandHandler("id", id_command))
     application.add_handler(CommandHandler("help", help_command))
 
     # handle unknown commands

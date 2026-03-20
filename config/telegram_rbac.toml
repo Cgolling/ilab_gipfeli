@@ -1,0 +1,5 @@
+# Telegram user IDs with full bot access.
+# Everyone else is treated as a normal user.
+admin_user_ids = [
+    # 123456789,
+]

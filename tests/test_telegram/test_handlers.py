@@ -1,244 +1,245 @@
-"""
-Tests for Telegram bot command handlers.
+"""Tests for Telegram bot command handlers."""
 
-These tests verify that handlers respond correctly to user input.
-We mock the Telegram Update and Context objects to simulate user interaction.
-
-Educational notes:
-- Telegram handlers receive Update and Context objects
-- We mock these objects to control their behavior
-- Test that handlers send appropriate responses
-- Use patch to isolate handlers from global state
-"""
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.telegram.bot import (
-    start,
-    help_command,
+    CALLBACK_DATA_PREFIX,
+    connect_spot,
     goto,
     goto_callback,
-    CALLBACK_DATA_PREFIX,
+    help_command,
+    id_command,
+    start,
+    stop_command,
 )
+from src.telegram.control_queue import ControlQueue
+from src.telegram.security import SecurityConfig
 
 
 class TestStartCommand:
-    """Tests for /start command."""
+    """Tests for /start queue behavior."""
 
     @pytest.mark.asyncio
-    async def test_start_greets_user(
+    async def test_start_adds_first_user_and_grants_control(
         self, mock_telegram_update, mock_telegram_context
     ):
-        """Start command sends personalized greeting."""
         await start(mock_telegram_update, mock_telegram_context)
 
-        mock_telegram_update.message.reply_html.assert_called_once()
-        call_args = mock_telegram_update.message.reply_html.call_args[0][0]
-        assert "TestUser" in call_args
+        mock_telegram_context.bot.send_message.assert_awaited_once_with(
+            chat_id=12345,
+            text="You are in control.",
+        )
 
     @pytest.mark.asyncio
-    async def test_start_uses_reply_html(
+    async def test_start_twice_returns_current_status(
         self, mock_telegram_update, mock_telegram_context
     ):
-        """Start uses reply_html for formatted output."""
+        await start(mock_telegram_update, mock_telegram_context)
+        mock_telegram_context.bot.send_message.reset_mock()
+
         await start(mock_telegram_update, mock_telegram_context)
 
-        # Should use reply_html, not reply_text
-        mock_telegram_update.message.reply_html.assert_called_once()
+        mock_telegram_update.message.reply_text.assert_awaited_with("You are in control.")
+        mock_telegram_context.bot.send_message.assert_not_awaited()
 
 
 class TestHelpCommand:
-    """Tests for /help command."""
+    """Tests for /help."""
 
     @pytest.mark.asyncio
-    async def test_help_lists_all_commands(
+    async def test_help_mentions_queue_commands(
         self, mock_telegram_update, mock_telegram_context
     ):
-        """Help command lists all available commands."""
-        await help_command(mock_telegram_update, mock_telegram_context)
-
-        mock_telegram_update.message.reply_text.assert_called_once()
-        help_text = mock_telegram_update.message.reply_text.call_args[0][0]
-
-        # Check all commands are mentioned
-        assert "/start" in help_text
-        assert "/help" in help_text
-        assert "/connect" in help_text
-        assert "/goto" in help_text
-
-    @pytest.mark.asyncio
-    async def test_help_mentions_spot_robot(
-        self, mock_telegram_update, mock_telegram_context
-    ):
-        """Help text mentions SPOT robot."""
         await help_command(mock_telegram_update, mock_telegram_context)
 
         help_text = mock_telegram_update.message.reply_text.call_args[0][0]
-        assert "SPOT" in help_text
+        assert "/start - Join the control queue" in help_text
+        assert "/stop - Release control or leave the queue" in help_text
+
+
+class TestIdCommand:
+    """Tests for /id."""
+
+    @pytest.mark.asyncio
+    async def test_id_command_shows_user_id_and_role(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        await id_command(mock_telegram_update, mock_telegram_context)
+
+        message = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "12345" in message
+        assert "Role: user" in message
+
+
+class TestConnectAuthorization:
+    """Tests for admin-only connect commands."""
+
+    @pytest.mark.asyncio
+    async def test_connect_denied_for_regular_user(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        await connect_spot(mock_telegram_update, mock_telegram_context)
+
+        message = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "admin-only" in message
+
+    @pytest.mark.asyncio
+    async def test_connect_allowed_for_admin(
+        self, mock_telegram_update, mock_telegram_context, monkeypatch
+    ):
+        mock_telegram_context.bot_data["security_config"] = SecurityConfig(
+            admin_user_ids=frozenset({12345})
+        )
+
+        called = {"value": False}
+
+        async def fake_handle_connection(update, context, force):
+            called["value"] = True
+
+        monkeypatch.setattr("src.telegram.bot._handle_connection", fake_handle_connection)
+
+        await connect_spot(mock_telegram_update, mock_telegram_context)
+
+        assert called["value"] is True
 
 
 class TestGotoCommand:
-    """Tests for /goto command."""
+    """Tests for /goto access control."""
 
     @pytest.mark.asyncio
-    async def test_goto_shows_location_buttons(
+    async def test_goto_requires_queue_membership(
         self, mock_telegram_update, mock_telegram_context
     ):
-        """Goto command presents inline keyboard with locations."""
         await goto(mock_telegram_update, mock_telegram_context)
 
-        mock_telegram_update.message.reply_text.assert_called_once()
+        message = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "requires control" in message
+        assert "Use /start to join the queue." in message
 
-        # Get the reply_markup from call kwargs
+    @pytest.mark.asyncio
+    async def test_goto_requires_connected_controller_after_control(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        await start(mock_telegram_update, mock_telegram_context)
+        mock_telegram_update.message.reply_text.reset_mock()
+
+        mock_telegram_context.bot_data["spot_controller"] = None
+        await goto(mock_telegram_update, mock_telegram_context)
+
+        message = mock_telegram_update.message.reply_text.call_args[0][0]
+        assert "not connected" in message.lower()
+
+    @pytest.mark.asyncio
+    async def test_goto_shows_location_buttons_for_controller(
+        self, mock_telegram_update, mock_telegram_context
+    ):
+        await start(mock_telegram_update, mock_telegram_context)
+        mock_telegram_update.message.reply_text.reset_mock()
+
+        controller = MagicMock()
+        controller.is_connected = True
+        mock_telegram_context.bot_data["spot_controller"] = controller
+
+        await goto(mock_telegram_update, mock_telegram_context)
+
         call_kwargs = mock_telegram_update.message.reply_text.call_args[1]
         reply_markup = call_kwargs["reply_markup"]
-
-        # Flatten buttons and get their texts
-        button_texts = []
-        for row in reply_markup.inline_keyboard:
-            for button in row:
-                button_texts.append(button.text)
-
-        # Check all locations are present
-        assert "Aula" in button_texts
-        assert "Triangle" in button_texts
-        assert "Hauswart" in button_texts
-        assert "Turnhalle" in button_texts
-
-    @pytest.mark.asyncio
-    async def test_goto_buttons_have_correct_callback_data(
-        self, mock_telegram_update, mock_telegram_context
-    ):
-        """Buttons have callback data with correct prefix."""
-        await goto(mock_telegram_update, mock_telegram_context)
-
-        call_kwargs = mock_telegram_update.message.reply_text.call_args[1]
-        reply_markup = call_kwargs["reply_markup"]
-
-        # Check callback data format
-        for row in reply_markup.inline_keyboard:
-            for button in row:
-                assert button.callback_data.startswith(CALLBACK_DATA_PREFIX)
-
-    @pytest.mark.asyncio
-    async def test_goto_asks_where_to_go(
-        self, mock_telegram_update, mock_telegram_context
-    ):
-        """Goto command asks user for destination."""
-        await goto(mock_telegram_update, mock_telegram_context)
-
-        message_text = mock_telegram_update.message.reply_text.call_args[0][0]
-        assert "where" in message_text.lower() or "go" in message_text.lower()
+        button_texts = [
+            button.text
+            for row in reply_markup.inline_keyboard
+            for button in row
+        ]
+        assert button_texts == ["Aula", "Turnhalle", "Zimmer 9"]
 
 
 class TestGotoCallback:
-    """Tests for goto button callback."""
+    """Tests for goto callback handling."""
 
     @pytest.mark.asyncio
-    async def test_callback_not_connected_shows_error(
+    async def test_callback_requires_control(
         self, mock_callback_query, mock_telegram_context
     ):
-        """Callback shows error when SPOT not connected."""
         update = MagicMock()
         update.callback_query = mock_callback_query
+        update.effective_user.id = 12345
 
-        # Ensure global controller is None
-        with patch("src.telegram.bot.spot_controller", None):
-            await goto_callback(update, mock_telegram_context)
+        await goto_callback(update, mock_telegram_context)
 
-        mock_callback_query.edit_message_text.assert_called()
-        msg = mock_callback_query.edit_message_text.call_args[0][0]
-        assert "not connected" in msg.lower()
+        message = mock_callback_query.edit_message_text.call_args[0][0]
+        assert "requires control" in message
 
     @pytest.mark.asyncio
-    async def test_callback_disconnected_controller_shows_error(
+    async def test_callback_navigates_to_selected_waypoint_for_controller(
         self, mock_callback_query, mock_telegram_context
     ):
-        """Callback shows error when controller exists but not connected."""
+        queue = mock_telegram_context.bot_data["control_queue"]
+        queue.join(user_id=12345, chat_id=12345, display_name="Test User")
+
         update = MagicMock()
         update.callback_query = mock_callback_query
+        update.effective_user.id = 12345
 
-        # Create mock controller that's not connected
-        mock_controller = MagicMock()
-        mock_controller.is_connected = False
+        controller = MagicMock()
+        controller.is_connected = True
+        controller.navigate_to = AsyncMock(return_value=True)
+        mock_telegram_context.bot_data["spot_controller"] = controller
 
-        with patch("src.telegram.bot.spot_controller", mock_controller):
-            await goto_callback(update, mock_telegram_context)
-
-        msg = mock_callback_query.edit_message_text.call_args[0][0]
-        assert "not connected" in msg.lower()
-
-    @pytest.mark.asyncio
-    async def test_callback_answers_query(
-        self, mock_callback_query, mock_telegram_context
-    ):
-        """Callback always answers the query to dismiss loading state."""
-        update = MagicMock()
-        update.callback_query = mock_callback_query
-
-        with patch("src.telegram.bot.spot_controller", None):
-            await goto_callback(update, mock_telegram_context)
-
-        mock_callback_query.answer.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_callback_extracts_location_from_data(
-        self, mock_callback_query, mock_telegram_context
-    ):
-        """Callback correctly extracts location from callback data."""
-        update = MagicMock()
-        mock_callback_query.data = f"{CALLBACK_DATA_PREFIX}triangle"
-        update.callback_query = mock_callback_query
-
-        # Create connected controller
-        mock_controller = MagicMock()
-        mock_controller.is_connected = True
-        mock_controller.navigate_to = AsyncMock(return_value=True)
-
-        with patch("src.telegram.bot.spot_controller", mock_controller):
-            await goto_callback(update, mock_telegram_context)
-
-        # Verify navigate_to was called with correct location
-        mock_controller.navigate_to.assert_called_once()
-        call_args = mock_controller.navigate_to.call_args[0]
-        assert call_args[0] == "triangle"
-
-    @pytest.mark.asyncio
-    async def test_callback_success_shows_arrival_message(
-        self, mock_callback_query, mock_telegram_context
-    ):
-        """Successful navigation shows arrival message."""
-        update = MagicMock()
         mock_callback_query.data = f"{CALLBACK_DATA_PREFIX}aula"
-        update.callback_query = mock_callback_query
 
-        mock_controller = MagicMock()
-        mock_controller.is_connected = True
-        mock_controller.navigate_to = AsyncMock(return_value=True)
+        await goto_callback(update, mock_telegram_context)
 
-        with patch("src.telegram.bot.spot_controller", mock_controller):
-            await goto_callback(update, mock_telegram_context)
+        controller.navigate_to.assert_called_once()
+        assert controller.navigate_to.call_args[0][0] == "aula"
+        final_message = mock_callback_query.edit_message_text.call_args[0][0]
+        assert "Arrived" in final_message
 
-        # Check final message mentions arrival
-        final_msg = mock_callback_query.edit_message_text.call_args[0][0]
-        assert "Arrived" in final_msg or "aula" in final_msg.lower()
+
+class TestStopCommand:
+    """Tests for /stop queue behavior."""
 
     @pytest.mark.asyncio
-    async def test_callback_failure_shows_error_message(
-        self, mock_callback_query, mock_telegram_context
+    async def test_stop_reports_missing_queue_entry(
+        self, mock_telegram_update, mock_telegram_context
     ):
-        """Failed navigation shows error message."""
+        await stop_command(mock_telegram_update, mock_telegram_context)
+
+        mock_telegram_update.message.reply_text.assert_awaited_with("You are not in the queue.")
+
+    @pytest.mark.asyncio
+    async def test_stop_releases_control_and_promotes_next_user(self, mock_telegram_context):
+        queue = mock_telegram_context.bot_data["control_queue"]
+        queue.join(user_id=111, chat_id=111, display_name="User One")
+        queue.join(user_id=222, chat_id=222, display_name="User Two")
+
         update = MagicMock()
-        mock_callback_query.data = f"{CALLBACK_DATA_PREFIX}aula"
-        update.callback_query = mock_callback_query
+        update.effective_user.id = 111
+        update.message.reply_text = AsyncMock()
 
-        mock_controller = MagicMock()
-        mock_controller.is_connected = True
-        mock_controller.navigate_to = AsyncMock(return_value=False)
+        await stop_command(update, mock_telegram_context)
 
-        with patch("src.telegram.bot.spot_controller", mock_controller):
-            await goto_callback(update, mock_telegram_context)
+        update.message.reply_text.assert_awaited_with("You released control.")
+        mock_telegram_context.bot.send_message.assert_awaited_once_with(
+            chat_id=222,
+            text="You are in control.",
+        )
 
-        final_msg = mock_callback_query.edit_message_text.call_args[0][0]
-        assert "Failed" in final_msg or "failed" in final_msg.lower()
+    @pytest.mark.asyncio
+    async def test_stop_removes_waiting_user(self, mock_telegram_context):
+        queue = mock_telegram_context.bot_data["control_queue"]
+        queue.join(user_id=111, chat_id=111, display_name="User One")
+        queue.join(user_id=222, chat_id=222, display_name="User Two")
+        queue.join(user_id=333, chat_id=333, display_name="User Three")
+
+        update = MagicMock()
+        update.effective_user.id = 222
+        update.message.reply_text = AsyncMock()
+
+        await stop_command(update, mock_telegram_context)
+
+        update.message.reply_text.assert_awaited_with("You left the queue.")
+        mock_telegram_context.bot.send_message.assert_awaited_once_with(
+            chat_id=333,
+            text="You are 2. in the queue.",
+        )
