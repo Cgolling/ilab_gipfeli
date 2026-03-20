@@ -6,12 +6,15 @@ import os
 import time
 from typing import Awaitable, Callable, Optional
 
+from google.protobuf.duration_pb2 import Duration
+
 from src.logging_config import setup_logging
 
 import bosdyn.client
 import bosdyn.client.util
-from bosdyn.api import robot_state_pb2
+from bosdyn.api import audio_visual_pb2, robot_state_pb2
 from bosdyn.api.graph_nav import graph_nav_pb2, map_pb2, nav_pb2
+from bosdyn.client.audio_visual import AudioVisualClient
 from bosdyn.client.exceptions import ProxyConnectionError, ResponseError, UnableToConnectToRobotError
 from bosdyn.client.frame_helpers import get_odom_tform_body
 from bosdyn.client.graph_nav import GraphNavClient
@@ -27,10 +30,9 @@ logger = logging.getLogger(__name__)
 
 # Waypoint mapping: location name -> waypoint short code
 WAYPOINTS = {
-    "aula": "al",
-    "triangle": "tv",
-    "hauswart": "oh",
-    "turnhalle": "cw",
+    "aula": "ck",
+    "turnhalle": "fc",
+    "zimmer 9": "bw",
 }
 
 # Timing constants (seconds)
@@ -221,6 +223,7 @@ class SpotController:
         self.robot_command_client = None
         self.robot_state_client = None
         self.power_client = None
+        self.av_client = None
 
         # Graph state
         self._current_graph = None
@@ -348,6 +351,13 @@ class SpotController:
             await status_callback("Robot localized successfully!")
 
             self._connected = True
+
+            # Set default white front LEDs
+            try:
+                await asyncio.to_thread(self._activate_default_leds)
+            except Exception as e:
+                logger.warning(f"Could not activate default LEDs: {e}")
+
             return True
 
         except ResourceAlreadyClaimedError as e:
@@ -406,6 +416,8 @@ class SpotController:
             GraphNavClient.default_service_name)
         self.power_client = self.robot.ensure_client(
             PowerClient.default_service_name)
+        self.av_client = self.robot.ensure_client(
+            AudioVisualClient.default_service_name)
 
         # Check initial power state
         power_state = self.robot_state_client.get_robot_state().power_state
@@ -564,6 +576,12 @@ class SpotController:
             return False
 
         try:
+            # Activate walking LEDs
+            try:
+                await asyncio.to_thread(self._activate_walking_leds)
+            except Exception:
+                pass
+
             # Find the full waypoint ID
             destination_waypoint = await asyncio.to_thread(
                 find_unique_waypoint_id,
@@ -593,9 +611,18 @@ class SpotController:
                 status_callback
             )
 
-            # Power off if we powered it on
-            if self._powered_on and not self._started_powered_on:
-                await asyncio.to_thread(self._toggle_power, False)
+            if success:
+                # Activate violet LEDs and stay standing on arrival
+                try:
+                    await asyncio.to_thread(self._activate_arrival_leds)
+                except Exception as e:
+                    logger.warning(f"Could not activate arrival LEDs: {e}")
+            else:
+                # Revert to default white LEDs on failure
+                try:
+                    await asyncio.to_thread(self._activate_default_leds)
+                except Exception:
+                    pass
 
             return success
 
@@ -706,9 +733,136 @@ class SpotController:
         else:
             return False, None  # Still navigating
 
+    async def stand(self) -> None:
+        """Power on motors and stand up."""
+        if not self.is_connected:
+            raise RuntimeError("Not connected to SPOT")
+        await asyncio.to_thread(self._toggle_power, True)
+        await asyncio.to_thread(
+            self.robot_command_client.robot_command,
+            RobotCommandBuilder.synchro_stand_command(),
+        )
+        logger.info("Robot standing")
+
+    async def sit(self) -> None:
+        """Sit down (keeps motors on)."""
+        if not self.is_connected:
+            raise RuntimeError("Not connected to SPOT")
+        await asyncio.to_thread(self._toggle_power, True)
+        await asyncio.to_thread(
+            self.robot_command_client.robot_command,
+            RobotCommandBuilder.synchro_sit_command(),
+        )
+        logger.info("Robot sitting")
+
+    # LED behavior names
+    LED_BEHAVIOR_DEFAULT = "gipfeli_default"
+    LED_BEHAVIOR_WALKING = "gipfeli_walking"
+    LED_BEHAVIOR_ARRIVAL = "gipfeli_arrival"
+
+    def _set_led_behavior(self, name: str, led_group, priority: int = 100) -> None:
+        """Add/modify and run an LED behavior."""
+        behavior = audio_visual_pb2.AudioVisualBehavior(
+            enabled=True,
+            priority=priority,
+            led_sequence_group=led_group,
+        )
+        self.av_client.add_or_modify_behavior(name, behavior)
+        end_time = time.time() + 3600
+        self.av_client.run_behavior(name, end_time)
+
+    def _clear_led_behaviors(self) -> None:
+        """Delete all gipfeli LED behaviors."""
+        for name in [self.LED_BEHAVIOR_DEFAULT, self.LED_BEHAVIOR_WALKING, self.LED_BEHAVIOR_ARRIVAL]:
+            try:
+                self.av_client.delete_behaviors(behavior_names=[name])
+            except Exception:
+                pass
+
+    def _activate_default_leds(self) -> None:
+        """Solid white front LEDs as default idle state."""
+        white = audio_visual_pb2.Color(
+            rgb=audio_visual_pb2.Color.RGB(r=255, g=255, b=255)
+        )
+        solid = audio_visual_pb2.LedSequenceGroup.LedSequence(
+            solid_color_sequence=audio_visual_pb2.LedSequenceGroup.LedSequence.SolidColorSequence(
+                color=white
+            )
+        )
+        led_group = audio_visual_pb2.LedSequenceGroup(
+            front_center=solid,
+            front_left=solid,
+            front_right=solid,
+        )
+        self._clear_led_behaviors()
+        self._set_led_behavior(self.LED_BEHAVIOR_DEFAULT, led_group)
+        logger.info("Default LEDs activated (white)")
+
+    def _activate_walking_leds(self) -> None:
+        """Slow white-red pulse on front LEDs while navigating."""
+        white = audio_visual_pb2.Color(
+            rgb=audio_visual_pb2.Color.RGB(r=255, g=255, b=255)
+        )
+        red = audio_visual_pb2.Color(
+            rgb=audio_visual_pb2.Color.RGB(r=255, g=0, b=0)
+        )
+        frame_duration = Duration(seconds=0.5) 
+        animation = audio_visual_pb2.LedSequenceGroup.LedSequence.AnimationSequence()
+        animation.frames.append(
+            audio_visual_pb2.LedSequenceGroup.LedSequence.AnimationSequence.Frame(
+                color=white, duration=frame_duration,
+                interpolation=audio_visual_pb2.LedSequenceGroup.InterpolationMode.INTERPOLATION_NONE,
+            )
+        )
+        animation.frames.append(
+            audio_visual_pb2.LedSequenceGroup.LedSequence.AnimationSequence.Frame(
+                color=red, duration=frame_duration,
+                interpolation=audio_visual_pb2.LedSequenceGroup.InterpolationMode.INTERPOLATION_NONE,
+            )
+        )
+        anim_sequence = audio_visual_pb2.LedSequenceGroup.LedSequence(
+            animation_sequence=animation
+        )
+        led_group = audio_visual_pb2.LedSequenceGroup(
+            front_center=anim_sequence,
+            front_left=anim_sequence,
+            front_right=anim_sequence,
+        )
+        self._clear_led_behaviors()
+        self._set_led_behavior(self.LED_BEHAVIOR_WALKING, led_group, priority=110)
+        logger.info("Walking LEDs activated (white-red flash)")
+
+    def _activate_arrival_leds(self) -> None:
+        """Solid violet LEDs on all positions to signal arrival."""
+        violet = audio_visual_pb2.Color(
+            rgb=audio_visual_pb2.Color.RGB(r=127, g=0, b=255)
+        )
+        solid = audio_visual_pb2.LedSequenceGroup.LedSequence(
+            solid_color_sequence=audio_visual_pb2.LedSequenceGroup.LedSequence.SolidColorSequence(
+                color=violet
+            )
+        )
+        led_group = audio_visual_pb2.LedSequenceGroup(
+            front_center=solid,
+            front_left=solid,
+            front_right=solid,
+            hind_left=solid,
+            hind_right=solid,
+        )
+        self._clear_led_behaviors()
+        self._set_led_behavior(self.LED_BEHAVIOR_ARRIVAL, led_group, priority=120)
+        logger.info("Arrival LEDs activated (violet)")
+
     async def disconnect(self):
         """Disconnect from SPOT and cleanup."""
         try:
+            # Turn off LEDs
+            if self.av_client:
+                try:
+                    await asyncio.to_thread(self._clear_led_behaviors)
+                except Exception:
+                    pass
+
             if self._powered_on and not self._started_powered_on:
                 await asyncio.to_thread(
                     self.robot_command_client.robot_command,

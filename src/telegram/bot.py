@@ -31,15 +31,14 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 # Configuration constants
-DEFAULT_SPOT_HOSTNAME = "192.168.80.3"
+DEFAULT_SPOT_HOSTNAME = "192.168.8.200"
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-DEFAULT_MAP_PATH = os.path.join(PROJECT_ROOT, "maps/map_catacombs_01")
+DEFAULT_MAP_PATH = os.path.join(PROJECT_ROOT, "maps/ilabZi9_withWP")
 CALLBACK_DATA_PREFIX = "goto_"
 WAYPOINTS = {
     "aula": "Aula",
-    "triangle": "Triangle",
-    "hauswart": "Hauswart",
     "turnhalle": "Turnhalle",
+    "zimmer9": "Zimmer 9",
 }
 
 # Define a few command handlers. These usually take the two arguments update and
@@ -68,6 +67,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/disconnect - Disconnect and release lease\n"
         "/forceconnect - Force take control (use if stuck!)\n"
         "/status - Show robot status\n\n"
+        "Posture:\n"
+        "/standup - Make SPOT stand up\n"
+        "/sitdown - Make SPOT sit down\n\n"
         "Navigation:\n"
         "/goto - Navigate to a location\n\n"
         "Other:\n"
@@ -92,8 +94,10 @@ async def _handle_connection(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "FORCE CONNECT: Taking control from any other client...\n"
             "(This will disconnect tablet or other scripts!)"
         )
+        status_message = await update.message.reply_text("Initializing force connection...")
     else:
         await update.message.reply_text("Starting SPOT connection procedure...")
+        status_message = await update.message.reply_text("Starting SPOT connection procedure...")
 
     # Disconnect existing controller if any to ensure clean slate
     current_controller = context.bot_data.get("spot_controller")
@@ -111,6 +115,10 @@ async def _handle_connection(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if not update.message:
             return
         await update.message.reply_text(msg)
+        try:
+            await status_message.edit_text(msg)
+        except BadRequest:
+            pass
 
     success = await spot_controller.connect(send_status, force_acquire=force)
 
@@ -215,6 +223,11 @@ async def goto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
     
+    spot_controller = context.bot_data.get("spot_controller")
+    if spot_controller is None or not spot_controller.is_connected:
+        await update.message.reply_text("SPOT not connected. Use /connect first.")
+        return
+    
     keyboard = []
     row = []
     for key, name in WAYPOINTS.items():
@@ -261,7 +274,12 @@ async def goto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             logger.warning(f"Unexpected error updating status message: {e}")
 
     logger.info(f"User requested navigation to: {location} ({location_name})")
-    success = await spot_controller.navigate_to(location, send_status)
+    try:
+        success = await spot_controller.navigate_to(location, send_status)
+    except Exception as e:
+        logger.exception(f"Navigation error: {e}")
+        await query.edit_message_text(f"Error during navigation: {e}")
+        return
 
     if success:
         logger.info(f"Navigation to {location_name} completed successfully")
@@ -271,17 +289,49 @@ async def goto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.edit_message_text(f"Failed to navigate to {location_name}")
 
 
+async def standup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Make SPOT stand up."""
+    if not update.message:
+        return
+
+    spot_controller = context.bot_data.get("spot_controller")
+    if spot_controller is None or not spot_controller.is_connected:
+        await update.message.reply_text("SPOT not connected. Use /connect first.")
+        return
+
+    try:
+        await spot_controller.stand()
+        await update.message.reply_text("SPOT is standing.")
+    except Exception as e:
+        logger.exception(f"Stand failed: {e}")
+        await update.message.reply_text(f"Failed to stand: {e}")
+
+
+async def sitdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Make SPOT sit down."""
+    if not update.message:
+        return
+
+    spot_controller = context.bot_data.get("spot_controller")
+    if spot_controller is None or not spot_controller.is_connected:
+        await update.message.reply_text("SPOT not connected. Use /connect first.")
+        return
+
+    try:
+        await spot_controller.sit()
+        await update.message.reply_text("SPOT is sitting.")
+    except Exception as e:
+        logger.exception(f"Sit failed: {e}")
+        await update.message.reply_text(f"Failed to sit: {e}")
+
+
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Inform the user that the command was not found."""
     if not update.message:
         return
     await update.message.reply_text(
-        "Sorry, I didn't understand that command.\n\n"
-        "Available commands:\n"
-        "/start - Start the bot\n"
-        "/help - Get help\n"
-        "/connect - Connect to SPOT robot\n"
-        "/goto - Go to a location"
+        "Sorry, I didn't understand that command.\n"
+        "Use /help to see available commands."
     )
 
 
@@ -362,6 +412,10 @@ def main() -> None:
     application.add_handler(CommandHandler("forceconnect", forceconnect_spot))
     application.add_handler(CommandHandler("disconnect", disconnect_spot))
     application.add_handler(CommandHandler("status", status_spot))
+
+    # Posture commands
+    application.add_handler(CommandHandler("standup", standup))
+    application.add_handler(CommandHandler("sitdown", sitdown))
 
     # Navigation commands
     application.add_handler(CommandHandler("goto", goto))

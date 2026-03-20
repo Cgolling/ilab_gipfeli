@@ -78,6 +78,11 @@ Examples:
         help="Show point cloud data (sampled for performance)",
     )
     parser.add_argument(
+        "--show-orientation",
+        action="store_true",
+        help="Show orientation arrows at each waypoint",
+    )
+    parser.add_argument(
         "--title",
         type=str,
         default=None,
@@ -120,6 +125,7 @@ Examples:
         show_fiducials=not args.no_fiducials,
         show_waypoint_labels=args.show_labels,
         show_point_clouds=args.show_point_clouds,
+        show_orientation=args.show_orientation,
         use_anchoring=args.anchoring,
     )
 

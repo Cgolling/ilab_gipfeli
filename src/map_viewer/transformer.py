@@ -142,6 +142,37 @@ def _compute_positions_via_bfs(
     return positions
 
 
+def compute_waypoint_orientations(
+    map_data: "MapData",
+    use_anchoring: bool = True,
+) -> dict[str, tuple[float, float, float]]:
+    """
+    Compute forward direction vectors for all waypoints.
+
+    The forward direction is the x-axis of the waypoint's rotation matrix
+    (SPOT's forward axis).
+
+    Args:
+        map_data: Loaded map data
+        use_anchoring: Use anchor seed frame if available
+
+    Returns:
+        Dict mapping waypoint_id to (dx, dy, dz) unit direction vector
+    """
+    if use_anchoring and map_data.anchors:
+        transforms = _compute_transforms_from_anchors(map_data)
+    else:
+        transforms = _compute_transforms_via_bfs(map_data)
+
+    orientations: dict[str, tuple[float, float, float]] = {}
+    for waypoint_id, mat in transforms.items():
+        # Forward direction is the x-axis of the rotation matrix
+        dx, dy, dz = float(mat[0, 0]), float(mat[1, 0]), float(mat[2, 0])
+        orientations[waypoint_id] = (dx, dy, dz)
+
+    return orientations
+
+
 def compute_edge_lines(
     map_data: "MapData",
     positions: dict[str, tuple[float, float, float]],

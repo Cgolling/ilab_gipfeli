@@ -11,6 +11,7 @@ from src.map_viewer.transformer import (
     compute_edge_lines,
     compute_fiducial_positions,
     compute_point_clouds,
+    compute_waypoint_orientations,
     compute_waypoint_positions,
 )
 from src.spot.spot_controller import id_to_short_code, WAYPOINTS
@@ -88,6 +89,7 @@ def create_figure(
     show_fiducials: bool = True,
     show_waypoint_labels: bool = False,
     show_point_clouds: bool = False,
+    show_orientation: bool = False,
     use_anchoring: bool = True,
 ) -> go.Figure:
     """
@@ -101,6 +103,7 @@ def create_figure(
         show_fiducials: Whether to show fiducial markers
         show_waypoint_labels: Whether to show labels on all waypoints
         show_point_clouds: Whether to show point cloud data
+        show_orientation: Whether to show orientation arrows at waypoints
         use_anchoring: Use anchor seed frame if available
 
     Returns:
@@ -171,6 +174,11 @@ def create_figure(
         fiducial_positions = compute_fiducial_positions(map_data, positions)
         if fiducial_positions:
             _add_fiducials_to_figure(fig, fiducial_positions)
+
+    # Add orientation arrows
+    if show_orientation:
+        orientations = compute_waypoint_orientations(map_data, use_anchoring=use_anchoring)
+        _add_orientation_arrows_to_figure(fig, positions, orientations)
 
     # Build toggle buttons for each trace type
     toggle_buttons = _create_toggle_buttons(fig)
@@ -369,6 +377,48 @@ def _add_fiducials_to_figure(
             hovertext=hover_texts,
             hoverinfo="text",
             name="Fiducials",
+        )
+    )
+
+
+def _add_orientation_arrows_to_figure(
+    fig: go.Figure,
+    positions: dict[str, tuple[float, float, float]],
+    orientations: dict[str, tuple[float, float, float]],
+) -> None:
+    """Add orientation arrows (cones) at each waypoint showing forward direction."""
+    x, y, z = [], [], []
+    u, v, w = [], [], []
+
+    for wp_id, pos in positions.items():
+        if wp_id not in orientations:
+            continue
+        x.append(pos[0])
+        y.append(pos[1])
+        z.append(pos[2])
+        dx, dy, dz = orientations[wp_id]
+        u.append(dx)
+        v.append(dy)
+        w.append(dz)
+
+    if not x:
+        return
+
+    fig.add_trace(
+        go.Cone(
+            x=x,
+            y=y,
+            z=z,
+            u=u,
+            v=v,
+            w=w,
+            sizemode="absolute",
+            sizeref=0.3,
+            anchor="tail",
+            colorscale=[[0, "rgb(220, 50, 50)"], [1, "rgb(220, 50, 50)"]],
+            showscale=False,
+            hoverinfo="skip",
+            name="Orientation",
         )
     )
 
